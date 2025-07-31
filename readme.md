@@ -1,12 +1,12 @@
-# ⚡ Node Meat Energy (NTE)
+# ⚡ Node Meta Energy (NTE)
 
-**Node Meat Energy (NTE)** is a next-generation utility token powering a decentralized, node-based earning and energy ecosystem. Built on the **BNB Smart Chain**, NTE enables users to stake, mine, earn rank-based bonuses, and participate in a secure and scalable token economy.
+**Node Meta Energy (NTE)** is a next-generation utility token powering a decentralized, node-based earning and energy ecosystem. Built on the **BNB Smart Chain**, NTE enables users to stake, mine, earn rank-based bonuses, and participate in a secure and scalable token economy.
 
 ---
 
 ## � Project Overview
 
-Node Meat Energy (NTE) is designed to revolutionize decentralized finance by combining staking, mining, referral rewards, and upgradeable smart contract architecture. The project aims to provide sustainable passive income, robust governance, and a secure environment for users and developers.
+Node Meta Energy (NTE) is designed to revolutionize decentralized finance by combining staking, mining, referral rewards, and upgradeable smart contract architecture. The project aims to provide sustainable passive income, robust governance, and a secure environment for users and developers.
 
 ---
 
@@ -26,7 +26,7 @@ Node Meat Energy (NTE) is designed to revolutionize decentralized finance by com
 ## 🧱 Contract Information
 
 - **Network:** BNB Smart Chain (Mainnet)
-- **Token Name:** Node Meat Energy
+- **Token Name:** Node Meta Energy
 - **Symbol:** NTE
 - **Decimals:** 18
 - **Total Supply:** 11,000,000,000 NTE
