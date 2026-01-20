@@ -3,441 +3,513 @@ pragma solidity ^0.8.28;
 
 /**
  * @title Node Meta Energy (NTE) - Advanced BEP20 Token
- * @author Node Meta Team
- * @notice Enterprise-grade token with comprehensive DeFi features, MEV protection, and security controls
- * @dev Implements BEP20 standard with tax system, auto-liquidity, anti-dump, and emergency controls
- * @custom:version 1.0.0
  * @custom:security-contact security@node-meta.com
  */
 
 /*
- * ERROR CODE LEGEND
- * E01  Not owner
- * E02  Paused
- * E03  Reentrancy
- * E04  Owner zero
- * E05  Supply zero
- * E06  Router not contract
- * E07  Factory zero
- * E08  Factory not contract
- * E09  WETH zero
- * E10  WETH not contract
- * E11  Pair zero
- * E12  Pair setup failed
- * E13  Router pair check fail
- * E14  Router WETH call fail
- * E15  Router factory call fail
- * E16  Blacklisted
- * E17  Renounce locked 30d
- * E18  New owner zero
- * E19  Already owner
- * E20  Already pending
- * E21  Not pending owner
- * E22  Transfer delay
- * E23  No pending transfer
- * E24  Buy tax > 25%
- * E25  Sell tax > 25%
- * E26  Transfer tax > 25%
- * E27  Total tax > 50%
- * E28  Tax cooldown
- * E29  Buy tax change > 2.5%
- * E30  Sell tax change > 2.5%
- * E31  Transfer tax change > 2.5%
- * E32  Invalid address
- * E33  Cannot blacklist owner
- * E34  Cannot blacklist contract
- * E35  Zero address
- * E36  Same treasury
- * E37  Treasury blacklisted
- * E38  Percent 1-100
- * E39  Amount > 0
- * E40  Exceeds supply
- * E41  Amount < min
- * E42  Fee 0-100
- * E43  Threshold negative
- * E44  Threshold missing
- * E45  Slippage low
- * E46  Slippage high
- * E47  Slippage zero
- * E48  Min impact 0.1%
- * E49  Impact 0.1-100%
- * E50  Cooldown negative
- * E51  Cooldown > 1d
- * E52  Router not set
- * E53  No tokens
- * E54  Auto-liq paused
- * E55  Locking disabled
- * E56  Invalid pair
- * E57  Amount > 0 (lock)
- * E58  Lock period > 0
- * E59  Already locked
- * E60  Insufficient LP
- * E61  Transfer fail
- * E62  Not locked
- * E63  Still locked
- * E64  Invalid token
- * E65  Zero recipient
- * E66  Insufficient balance
- * E67  LP locked reserve
- * E68  Slippage exceeds
- * E69  Wait 30d
- * E70  Invalid recipient
- * E71  Insufficient BNB
- * E72  BNB transfer fail
- * E73  Circuit not triggered
- * E74  Max blocks high
- * E75  Min time high
- * E76  Mint to zero
- * E77  Burn from zero
- * E78  Burn exceeds bal
- * E79  From zero
- * E80  To zero
- * E81  Sender blacklisted
- * E82  Recipient blacklisted
- * E83  Exceeds balance
- * E84  Approve from zero
- * E85  Approve to zero
- * E86  Overflow
- * E87  Allowance below zero
- * E88  Insufficient allowance
- * E89  Transfers paused
- * E90  MEV: too frequent
- * E91  MEV: too fast
- * E92  MEV: DEX interval
- * E93  Exceeds max tx
- * E94  Balance overflow
- * E95  Exceeds max wallet
- * E96  Sender cooldown
- * E97  Recipient cooldown
- * E98  Price impact high
- * E99  Exceeds anti-dump
- * E100 Sell cooldown
- * E101 Anti-bot active
- * E102 Accumulated overflow
- * E103 Tax accounting
- * E104 Router not validated
- * E105 Slippage max
- * E106 Total liquidity overflow
- * 
- * EVENT MESSAGE CODES (for emit statements)
- * M01  Treasury updated
- * M02  Circuit breaker reset
- * M03  MEV: block interval
- * M04  MEV: time interval
- * M05  MEV: DEX block interval
- * M06  Swap: invalid amounts
- * M07  Swap: unknown error
- * M08  Swap: get amounts fail
- * M09  Circuit: slippage fails
- * M10  Liquidity: add failed
- * M11  Liquidity: unknown error
- * M12  Liquidity: swap failed
+ * ═══════════════════════════════════════════════════════════════════════════
+ * ERROR CODES - Making Sense of Reverts
+ * ═══════════════════════════════════════════════════════════════════════════
+ * We use descriptive prefixes so you know exactly why a transaction failed.
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ PERMISSIONS & OWNERSHIP [AUTH_*]                                        │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * AUTH_OWNER       Only the owner can do this   AUTH_ZERO_OWNER    Owner can't be zero address
+ * AUTH_LOCKED      Ownership lock active (30d)  AUTH_SAME_OWNER    Already the current owner
+ * AUTH_INVALID     Invalid auth signer key       AUTH_ALREADY_SET   Signer is already authorized
+ * AUTH_NOT_SET     Signer isn't authorized       AUTH_ZERO_ADDR     Signer can't be zero address
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ SYSTEM & SECURITY [SYS_*, SEC_*]                                        │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * SYS_PAUSED       Contract is paused            SEC_REENTRY        No reentrancy allowed
+ * SYS_DISABLED     Transfers are disabled        SEC_BOT_ACTIVE     Anti-bot period active
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ DEX & LIQUIDITY [DEX_*]                                                 │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * DEX_ROUTER       Router isn't a contract       DEX_PAIR_ZERO      Pair address is zero
+ * DEX_FACTORY_ZERO Factory address is zero       DEX_PAIR_FAIL      Failed to set up pair
+ * DEX_FACTORY      Factory isn't a contract      DEX_PAIR_CHECK     Pair validation failed
+ * DEX_WETH_ZERO    WETH address is zero          DEX_WETH_CALL      WETH call failed
+ * DEX_WETH         WETH isn't a contract         DEX_FACTORY_CALL   Factory call failed
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ THE TAX MAN [TAX_*]                                                     │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * TAX_BUY_HIGH     Buy tax is over 25%           TAX_BUY_DELTA      Buy tax changed too much
+ * TAX_SELL_HIGH    Sell tax is over 25%          TAX_SELL_DELTA     Sell tax changed too much
+ * TAX_XFER_HIGH    Transfer tax is over 25%      TAX_XFER_DELTA     Transfer tax changed too much
+ * TAX_TOTAL_HIGH   Total tax is over 50%         TAX_COOLDOWN       Wait before changing taxes
+ * TAX_TREASURY_ZERO Treasury can't be zero       TAX_TREASURY_SAME  Already using this treasury
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ BLACKLISTS & WHITELISTS [BL_*, WL_*]                                    │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * BL_OWNER         Can't blacklist the owner     BL_SENDER          Sender is blacklisted
+ * BL_CONTRACT      Can't blacklist this contract BL_RECIPIENT       Recipient is blacklisted
+ * WL_REQUIRED      You need to be whitelisted
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ TRANSACTION CHECKS [TXN_*, ADDR_*]                                      │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * TXN_AMOUNT_ZERO  Need to send more than 0      TXN_EXCEEDS_BAL    Not enough tokens
+ * ADDR_FROM_ZERO   Sending from zero address     TXN_OVERFLOW       Math overflow detected
+ * ADDR_TO_ZERO     Sending to zero address       TXN_SUPPLY_ZERO    Initial supply can't be 0
+ * TXN_REPLAY       This transaction was used
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ APPROVALS [APRV_*]                                                      │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * APRV_FROM_ZERO   Approving from zero address   APRV_UNDERFLOW     Allowance below zero
+ * APRV_TO_ZERO     Approving to zero address     APRV_INSUFFICIENT  Not enough allowance
+ * APRV_OVERFLOW    Allowance overflow
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ MINTING & BURNING [MINT_*, BURN_*]                                      │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * MINT_TO_ZERO     Can't mint to zero address    BURN_FROM_ZERO     Can't burn from zero
+ * BURN_EXCEEDS     Burning more than you have
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ SHIELD PROTECTION [MEV_*]                                               │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * MEV_BLOCKS_HIGH  Block limit set too high      MEV_TOO_FAST       Wait a bit between trades
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ TIMERS & LIMITS [CD_*, LIMIT_*]                                         │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * CD_TOO_HIGH      Cooldown is over 1 day        CD_SELL            Sell cooldown active
+ * CD_SENDER        Sender is on cooldown
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ STABILITY & ANTI-DUMP [DUMP_*, PRICE_*]                                 │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * DUMP_PERCENT     Percentage must be 1-100      DUMP_EXCEEDS       Selling too much at once
+ * PRICE_MIN_IMPACT Min impact is 0.1%            PRICE_TOO_HIGH     Price impact is too big
+ * PRICE_INVALID    Impact must be 0.1% to 100%
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ CATEGORIES [CAT_*]                                                      │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * CAT_INVALID      This category doesn't exist   CAT_DISABLED       Category is turned off
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ EMERGENCY RESCUE [EMG_*]                                                │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * EMG_TRANSFER_FAIL Token transfer failed         EMG_INVALID_RECIP  Recipient is invalid
+ * EMG_INVALID_TOKEN Token address is invalid      EMG_INSUF_BAL_BNB  Not enough BNB
+ * EMG_ZERO_RECIP   Recipient is zero address      EMG_BNB_FAIL       BNB transfer failed
+ * EMG_INSUF_BAL    Not enough balance            EMG_WAIT_30D       Wait 30 days after launch
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ GENERAL CHECKS [ADDR_*]                                                 │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * ADDR_INVALID     Address is invalid or zero    ADDR_ZERO          Zero address not allowed
+ * ADDR_ZERO_ADDR   Zero address in signature
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ * EVENT MESSAGE CODES
+ * ═══════════════════════════════════════════════════════════════════════════
+ * TREASURY_UPDATED Treasury address updated
+ * MEV_BLOCK        Block interval too short
+ * MEV_TIME         Time interval too short
  */
 
 /// @title PancakeSwap Router Interface
-/// @notice Interface for PancakeSwap Router V2 operations
+/// @notice Minimal interface used for price quotes and pair routing
 interface IPancakeRouter {
-    /// @notice Returns factory contract address
+    /// @notice Returns the PancakeSwap factory address
     function factory() external pure returns (address);
-    /// @notice Returns WETH contract address  
+    /// @notice Returns the wrapped native token (WETH) address  
     function WETH() external pure returns (address);
-    /// @notice Swap tokens for ETH supporting fee-on-transfer tokens
-    function swapExactTokensForETHSupportingFeeOnTransferTokens(
-        uint amountIn,
-        uint amountOutMin,
-        address[] calldata path,
-        address to,
-        uint deadline
-    ) external;
-    /// @notice Add liquidity for ETH pairs
-    function addLiquidityETH(
-        address token,
-        uint amountTokenDesired,
-        uint amountTokenMin,
-        uint amountETHMin,
-        address to,
-        uint deadline
-    ) external payable returns (uint amountToken, uint amountETH, uint liquidity);
-    /// @notice Get amounts out for given input amount and path
+    /// @notice Returns output amounts for a given input amount and swap path
     function getAmountsOut(uint amountIn, address[] calldata path) external view returns (uint[] memory amounts);
 }
 
+/// @title PancakeSwap Pair Interface
+interface IPancakePair {
+    function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
+    function token0() external view returns (address);
+    function token1() external view returns (address);
+}
+
 /// @title PancakeSwap Factory Interface
-/// @notice Interface for PancakeSwap Factory V2 operations  
+/// @notice Minimal factory interface used for pair creation and lookup  
 interface IPancakeFactory {
-    /// @notice Creates a pair for two tokens
+    /// @notice Creates a new pair for two tokens
     function createPair(address tokenA, address tokenB) external returns (address pair);
-    /// @notice Returns pair address for two tokens
+    /// @notice Returns the pair address for two tokens, or zero if none
     function getPair(address tokenA, address tokenB) external view returns (address pair);
 }
 
 /// @title Standard ERC20 Interface
-/// @notice Standard interface for ERC20 token operations
+/// @notice Core ERC20 interface with an extra categorized transfer event
 interface IERC20 {
+    /**
+     * @notice Returns the total token supply.
+     * @return The total supply of tokens.
+     */
     function totalSupply() external view returns (uint256);
+
+    /**
+     * @notice Returns the account balance of another account with address `account`.
+     * @param account The address of the account to query.
+     * @return The balance of the account.
+     */
     function balanceOf(address account) external view returns (uint256);
+
+    /**
+     * @notice Transfers `amount` tokens to address `to`.
+     * @param to The address of the recipient.
+     * @param amount The amount of tokens to transfer.
+     * @return True if the transfer succeeds.
+     */
     function transfer(address to, uint256 amount) external returns (bool);
+
+    /**
+     * @notice Returns the amount which `spender` is still allowed to withdraw from `owner`.
+     * @param owner The address of the token owner.
+     * @param spender The address of the authorized spender.
+     * @return The remaining allowance.
+     */
     function allowance(address owner, address spender) external view returns (uint256);
+
+    /**
+     * @notice Allows `spender` to withdraw from your account multiple times, up to the `amount` amount.
+     * @param spender The address of the authorized spender.
+     * @param amount The max amount they can spend.
+     * @return True if the approval succeeds.
+     */
     function approve(address spender, uint256 amount) external returns (bool);
+
+    /**
+     * @notice Transfers `amount` tokens from address `from` to address `to`.
+     * @param from The address of the sender.
+     * @param to The address of the recipient.
+     * @param amount The amount of tokens to transfer.
+     * @return True if the transfer succeeds.
+     */
     function transferFrom(address from, address to, uint256 amount) external returns (bool);
+
+    /**
+     * @notice Emitted when `value` tokens are moved from one account (`from`) to another (`to`).
+     */
     event Transfer(address indexed from, address indexed to, uint256 value);
+
+    /**
+     * @notice Emitted when the allowance of a `spender` for an `owner` is set.
+     */
     event Approval(address indexed owner, address indexed spender, uint256 value);
+
+    /**
+     * @notice Emitted when a transfer is tagged with a payment category.
+     * @param from The sender of the tokens.
+     * @param to The recipient of the tokens.
+     * @param value The amount of tokens moved.
+     * @param category The ID of the payment category.
+     * @param referenceId External reference ID for tracking.
+     * @param memo Optional note about the transfer.
+     */
+    event transactionProcessed(address indexed from, address indexed to, uint256 value, uint8 category, string referenceId, string memo);
 }
 
 contract NTE is IERC20 {
     
     // ===================================================
-    // STATE VARIABLES
+    // THE BASICS - Balances, Ownership, and State
     // ===================================================
     
-    /// @notice ERC20 token balances mapping
+    /// @notice Keeps track of how many tokens everyone has
     mapping(address => uint256) private _balances;
-    /// @notice ERC20 allowances mapping (owner => spender => amount)
+    /// @notice Who is allowed to spend someone else's tokens
     mapping(address => mapping(address => uint256)) private _allowances;
-    /// @notice Total token supply
+    /// @notice Total amount of NTE tokens in existence
     uint256 private _totalSupply;
     
-    /// @notice Contract owner address
+    /// @notice The current captain of the contract
     address private _owner;
     
-    /// @notice Contract pause state for emergency control
+    /// @notice A master switch to stop all transfers if something goes wrong
     bool private _paused;
     
-    /// @notice Treasury wallet receiving tax payments
+    /// @notice Wallets authorized to sign off-chain instructions (apps, websites, services)
+    mapping(address => bool) public isAuthSigner;
+    
+    /// @notice The wallet where all collected taxes are sent
     address public treasury;
     
-    /// @notice Buy tax in basis points (1 bp = 0.01%)
+    /// @notice Tax taken when buying (in basis points: 100 = 1%)
     uint256 public buyTaxBps;
-    /// @notice Sell tax in basis points (1 bp = 0.01%)
+    /// @notice Tax taken when selling
     uint256 public sellTaxBps;
-    /// @notice Transfer tax in basis points (1 bp = 0.01%)
+    /// @notice Tax taken for standard wallet-to-wallet transfers
     uint256 public transferTaxBps;
     
-    /// @notice PancakeSwap router contract address
+    /// @notice The PancakeSwap router we talk to
     address public pancakeRouter;
-    /// @notice Main trading pair address (NTE/WETH)
+    /// @notice Our main trading pool (NTE/WETH)
     address public pancakePair;
-    /// @notice Mapping of addresses recognized as trading pairs
+    /// @notice A list of addresses we treat as DEX pools
     mapping(address => bool) public isPancakePair;
     
-    /// @notice Anti-bot protection enabled state
+    /// @notice Counter for all tokens ever sent to the burn address
+    uint256 public totalBurned;
+    
+    /// @notice Whether our anti-bot shields are currently up
     bool public antiBotEnabled;
-    /// @notice Contract deployment timestamp
+    /// @notice When the contract was first deployed
     uint256 public launchTime;
-    /// @notice Anti-bot protection duration in seconds
+    /// @notice How long the anti-bot protection lasts after launch
     uint256 public antiBotDuration;
     
-    /// @notice Token name
-    string private _name;
-    /// @notice Token symbol
-    string private _symbol;
-    /// @notice Token decimals
-    uint8 private _decimals;
-    /// @notice Token logo URL for metadata
-    string private _tokenLogo;
-    /// @notice Token description for metadata
-    string private _description;
-    /// @notice Official website URL
-    string private _website;
+    // ===================================================
+    // SMART CATEGORIES - Organized Payments
+    // ===================================================
     
-    /// @notice Anti-dump protection enabled state
+    /// @notice Details for a categorized transaction
+    struct CategorizedTransaction {
+        address from;
+        address to;
+        uint256 amount;
+        uint8 category;
+        string txReference;
+        string memo;
+        uint256 timestamp;
+    }
+    
+    /// @notice How many trades happened in each category
+    mapping(uint8 => uint256) public categoryTransactionCount;
+    /// @notice Total volume of tokens moved per category
+    mapping(uint8 => uint256) public categoryTotalVolume;
+    /// @notice Your personal trade count per category
+    mapping(address => mapping(uint8 => uint256)) public userCategoryCount;
+    /// @notice Your personal volume per category
+    mapping(address => mapping(uint8 => uint256)) public userCategoryVolume;
+    
+    /// @notice A list of the most recent categorized transfers
+    CategorizedTransaction[] private recentCategorizedTxs;
+    /// @notice We only keep the last 100 categorized trades in memory
+    uint256 public constant MAX_STORED_TXS = 100;
+    /// @notice Internal tracker for the rolling transaction list
+    uint256 private _categorizedTxCounter;
+    
+    /// @notice Whether a specific category is active right now
+    mapping(uint8 => bool) public categoryEnabled;
+
+    /**
+     * @notice A personal "counter" for your categorized trades to prevent double-spending.
+     */
+    mapping(address => uint256) public userCategorizedNonce;
+    
+    /// @notice The names for our payment categories (e.g., "Charity", "Business")
+    mapping(uint8 => string) public categoryNames;
+    /// @notice How many categories we've created so far
+    uint8 public totalCategories;
+
+    /// @notice Emitted when we add a new authorized signer
+    event AuthSignerAdded(address indexed authAddress);
+    
+    /// @notice Emitted when we remove an authorized signer
+    event AuthSignerRemoved(address indexed authAddress);
+    
+    /// @notice What we call the token
+    string private _name;
+    /// @notice The 3-letter ticker
+    string private _symbol;
+    /// @notice How many decimal places (standard is 18)
+    uint8 private constant _decimals = 18;
+    /// @notice Link to our official logo
+    string private constant _tokenLogo = "https://node-meta.com/logo/node-meta.png";
+    /// @notice A quick tagline for the project
+    string private constant _description = "Node Meta Energy (NTE) - Revolutionary Blockchain Technology";
+    /// @notice Where you can find us online
+    string private constant _website = "https://node-meta.com";
+    
+    /// @notice Whether we're stopping big whales from dumping
     bool public antiDumpEnabled;
-    /// @notice Maximum percentage of supply sellable per transaction
+    /// @notice The biggest slice of the pie you can sell at once
     uint256 public maxSellPercentage;
-    /// @notice Cooldown period between large sells
+    /// @notice How long you have to wait between large sells
     uint256 public sellCooldown;
     
-    /// @notice Tax exempt addresses (no fees applied)
+    /// @notice People on this list don't pay any taxes
     mapping(address => bool) public taxExempt;
     
-    /// @notice Liquidity lock information structure
-    /// @dev Stores details about locked LP tokens to prevent rug pulls
-    struct LiquidityLock {
-        uint256 amount;        /// Amount of LP tokens locked
-        uint256 lockTime;      /// Timestamp when locked
-        uint256 unlockTime;    /// Timestamp when unlockable
-        bool isLocked;         /// Current lock status
-        address locker;        /// Address that locked the tokens
-    }
-    /// @notice Mapping of LP token addresses to their lock info
-    mapping(address => LiquidityLock) public liquidityLocks;
-    /// @notice Global liquidity lock feature enabled state
-    bool public liquidityLockEnabled;
+    /// @notice People on this list are blocked from trading
+    mapping(address => bool) public isBlacklisted;
+    /// @notice When a temporary blacklist ends (0 means forever)
+    mapping(address => uint256) public blacklistExpiry;
     
-    /// @notice Auto-liquidity feature enabled state
-    bool public autoLiquidityEnabled;
-    /// @notice Percentage of tax allocated to liquidity (0-100)
-    uint256 public liquidityFeePercent;
-    /// @notice Minimum tokens required to trigger auto-liquidity
-    uint256 public liquidityThreshold;
-    /// @notice Tokens accumulated for next liquidity addition
-    uint256 public accumulatedLiquidityTokens;
-    /// @notice Reentrancy guard for liquidity operations
-    bool private inSwapAndLiquify;
-    /// @notice Total tokens converted to liquidity since deployment
-    uint256 public totalLiquidityAdded;
-    /// @notice Timestamp of last liquidity addition
-    uint256 public lastLiquidityAddTime;
-    /// @notice Slippage tolerance for auto-liquidity swaps (basis points)
-    uint256 public autoLiquiditySlippageBps;
+    /// @notice Whether we're in "VIP-only" mode (whitelisted only)
+    bool public whitelistEnabled;
+    /// @notice People allowed to trade when VIP-only mode is on
+    mapping(address => bool) public isWhitelisted;
+    /// @notice When someone's whitelist access expires
+    mapping(address => uint256) public whitelistExpiry;
     
-    /// @notice Price impact protection enabled state
+    /// @notice Whether we're blocking trades that move the price too much
     bool public priceImpactLimitEnabled;
-    /// @notice Maximum allowed price impact in basis points
+    /// @notice Maximum price movement allowed in a single trade
     uint256 public maxPriceImpactPercent;
-    /// @notice Addresses exempt from price impact limits
+    /// @notice People who are allowed to move the price as much as they want
     mapping(address => bool) public priceImpactExempt;
     
-    /// @notice Wallet cooldown system enabled state
+    /// @notice Whether we're forcing a wait time between every trade
     bool public walletCooldownEnabled;
-    /// @notice Global cooldown time between trades (seconds)
+    /// @notice The mandatory wait time between trades (in seconds)
     uint256 public globalCooldownSeconds;
-    /// @notice Last trade timestamp per wallet
+    /// @notice When a wallet last made a trade
     mapping(address => uint256) public lastTradeTime;
     
-    /// @notice Reentrancy protection flag
+    /// @notice Internal guard to prevent "re-entry" attacks
     bool private _entered;
-    /// @notice Emergency pause state for auto-liquidity
-    bool public autoLiquidityPaused;
 
-    
-    /// @notice Minimum allowed slippage (0.1%)
-    uint256 private constant MIN_SLIPPAGE_BPS = 10;
-    /// @notice Maximum allowed slippage (10%)
-    uint256 private constant MAX_SLIPPAGE_BPS = 1000;
-    /// @notice Threshold for dynamic slippage calculation
-    uint256 private constant DYNAMIC_SLIPPAGE_THRESHOLD = 1000 * 10**18;
-    /// @notice High volume slippage setting (2%)
-    uint256 private constant HIGH_VOLUME_SLIPPAGE = 200;
-    /// @notice Low volume slippage setting (5%)
-    uint256 private constant LOW_VOLUME_SLIPPAGE = 500;
-    /// @notice Maximum cooldown duration (1 day)
+    /// @notice We lock the Chain ID here to prevent signature theft on other chains
+    uint256 private immutable _deploymentChainId;
+
+    /// @notice Maximum allowed cooldown (1 full day)
     uint256 private constant MAX_COOLDOWN = 86400;
-    /// @notice Absolute maximum slippage allowed (20%)
-    uint256 private constant ABSOLUTE_MAX_SLIPPAGE = 2000;
-    /// @notice Current maximum allowed slippage (10% default)
-    uint256 public maxAllowedSlippage = 1000;
-    /// @notice Basis points constant (10000 = 100%)
+    /// @notice Our math denominator (10000 = 100%)
     uint256 private constant BASIS_POINTS = 10000;
+    /// @notice Safety cap for the length of text strings
+    uint256 private constant MAX_STRING_LENGTH = 256;
+    /// @notice Maximum wait time for anti-dump rules (30 days)
+    uint256 private constant MAX_ANTI_DUMP_COOLDOWN = 30 days;
 
     
-    /// @notice Last timestamp when taxes were changed
+    /// @notice The last time we updated the tax rates
     uint256 private _lastTaxChangeTime;
-    /// @notice Cooldown period between tax changes (1 day)
+    /// @notice Safety rule: taxes can only be changed once every 24 hours
     uint256 private constant TAX_CHANGE_COOLDOWN = 1 days;
     
-    /// @notice Whether owner is also paused during contract pause
+    /// @notice Whether even the owner is blocked when the contract is paused
     bool public pauseIncludesOwner;
     
-    /// @notice Consecutive slippage failure counter
-    uint256 private _consecutiveSlippageFailures;
-    /// @notice Maximum failures before circuit breaker (3)
-    uint256 private constant MAX_CONSECUTIVE_FAILURES = 3;
     
-    /// @notice Validated router addresses mapping
-    mapping(address => bool) private _validatedRouters;
-    
-    /// @notice MEV protection enabled state
+    /// @notice Whether our "MEV Shield" is active against bots
     bool public mevProtectionEnabled;
-    /// @notice Maximum blocks between transactions for MEV detection
+    /// @notice How many blocks apart trades must be
     uint256 public maxBlocksForMevProtection;
-    /// @notice Last block number per wallet for MEV tracking
+    /// @notice Keeping track of which block a wallet last traded in
     mapping(address => uint256) public lastBlockNumber;
-    /// @notice Addresses exempt from MEV protection
+    /// @notice People who are allowed to bypass MEV checks
     mapping(address => bool) public mevProtectionExempt;
-    /// @notice Minimum time between transactions (seconds)
+    /// @notice Minimum time (in seconds) between trades
     uint256 public minTimeBetweenTxs;
+    
+    // ===================================================
+    // VELOCITY CONTROL - Slowing Down the Pace
+    // ===================================================
+    
+    /// @notice Whether we're limiting how many trades you can do in a row
+    bool public velocityLimitEnabled;
+    /// @notice The "speed limit" for transactions
+    uint256 public maxTxPerWindow;
+    /// @notice The time window (in seconds) for the speed limit
+    uint256 public velocityTimeWindow;
+    
+    /// @notice Max number of trades we track for the speed limit
+    uint256 public constant MAX_VELOCITY_BUFFER = 10;
+    /// @notice Internal counter for your "speed limit" tracker
+    mapping(address => uint256) private userVelocityIndex;
+    /// @notice A list of your most recent trade timestamps
+    /// @dev We keep it at 10 to keep gas costs low.
+    mapping(address => uint256[MAX_VELOCITY_BUFFER]) private userVelocityBuffer;
+
+    /**
+     * @notice People who don't have a "speed limit" on their trades.
+     */
+    mapping(address => bool) public velocityLimitExempt;
 
     // ===================================================
     // EVENTS
     // ===================================================
     
-    /// @notice Emitted when contract ownership is transferred
+    /// @notice Emitted when contract ownership changes
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
     /// @notice Emitted when contract is paused
     event Paused(address account);
     /// @notice Emitted when contract is unpaused
     event Unpaused(address account);
-    /// @notice Emitted when tax exemption status changes
+    /// @notice Emitted when tax exemption status is updated
     event TaxExemptUpdated(address account, bool exempt);
-    /// @notice Emitted when token name and symbol are updated
+    /// @notice Emitted when blacklist status for an address changes
+    event BlacklistUpdated(address indexed account, bool isBlacklisted);
+    /// @notice Emitted when whitelist status for an address changes
+    event WhitelistUpdated(address indexed account, bool isWhitelisted);
+    /// @notice Emitted when whitelist-only trading mode is toggled
+    event WhitelistModeUpdated(bool enabled);
+    /// @notice Emitted when token name and symbol change
     event NameSymbolUpdated(string newName, string newSymbol);
-    /// @notice Emitted when token metadata is updated
+    /// @notice Emitted when token metadata (branding) changes
     event MetadataUpdated(string tokenURI);
-    /// @notice Emitted when PancakeSwap router is updated
-    event PancakeRouterUpdated(address newRouter);
     /// @notice Emitted when anti-bot configuration changes
     event AntiBotConfigUpdated(bool enabled, uint256 duration);
     /// @notice Emitted when anti-dump configuration changes
     event AntiDumpConfigUpdated(bool enabled, uint256 maxPercentage, uint256 cooldown);
-    /// @notice Emitted when liquidity is locked
-    event LiquidityLocked(address indexed pair, uint256 amount, uint256 unlockTime);
-    /// @notice Emitted when liquidity is unlocked
-    event LiquidityUnlocked(address indexed pair, uint256 amount);
-    /// @notice Emitted when auto-liquidity configuration changes
-    event AutoLiquidityConfigUpdated(bool enabled, uint256 feePercent, uint256 threshold);
-    /// @notice Emitted when auto-liquidity slippage is updated
-    event AutoLiquiditySlippageUpdated(uint256 newSlippageBps);
-    /// @notice Emitted when price impact limit configuration changes
+    /// @notice Emitted when price impact limit settings change
     event PriceImpactLimitConfigUpdated(bool enabled, uint256 maxImpact);
-    /// @notice Emitted when price impact exemption status changes
+    /// @notice Emitted when price impact exemption for an address changes
     event PriceImpactExemptUpdated(address indexed account, bool exempt);
-    /// @notice Emitted when wallet cooldown configuration changes
+    /// @notice Emitted when wallet cooldown settings change
     event WalletCooldownConfigUpdated(bool enabled, uint256 cooldownSeconds);
-    /// @notice Emitted when tax exemption is batch updated
-    event TaxExemptBatchUpdated(address[] accounts, bool exempt);
-    /// @notice Emitted when maximum slippage is updated
-    event MaxSlippageUpdated(uint256 oldSlippage, uint256 newSlippage);
-    /// @notice Emitted when swap operation is attempted
-    event SwapAttempted(uint256 amount, uint256 slippageBps, bool success);
-    /// @notice Emitted when swap operation fails
-    event SwapFailed(uint256 amount, string reason);
-    /// @notice Emitted when liquidity is successfully added
-    event LiquidityAdded(uint256 amountToken, uint256 amountETH, uint256 liquidity);
-    /// @notice Emitted when liquidity operation fails
-    event LiquidityOperationFailed(string operation, string reason);
     /// @notice Emitted when BNB is received by the contract
     event BNBReceived(address indexed sender, uint256 amount);
-    /// @notice Emitted when pair status is updated
-    event PairStatusUpdated(address indexed pair, bool isPair);
-    /// @notice Emitted when circuit breaker is triggered
-    event CircuitBreakerTriggered(string reason);
-    /// @notice Emitted when tax change is rate limited
-    event TaxChangeRateLimited(uint256 attemptedChange, uint256 allowedChange);
     
-    /// @notice Emitted when MEV protection configuration changes
+    /// @notice Emitted when the treasury address is updated
+    event TreasuryUpdated(address indexed newTreasury);
+    
+    /// @notice Emitted when tax rates are updated
+    event TaxRatesUpdated(uint256 newBuyTaxBps, uint256 newSellTaxBps, uint256 newTransferTaxBps);
+    
+    /// @notice Emitted when protection settings change
     event MevProtectionConfigured(bool enabled, uint256 maxBlocks, uint256 minTime);
-    /// @notice Emitted when MEV attack is prevented
+    /// @notice Emitted specifically when MEV protection is toggled on/off
+    event MevProtectionToggled(bool enabled);
+    /// @notice Emitted when a transaction is blocked by protection logic
     event MevAttackPrevented(address indexed account, uint256 blockNumber, string reason);
-    /// @notice Emitted when MEV protection exemption status changes
+    /// @notice Emitted when protection exemption for an address changes
     event MevProtectionExemptUpdated(address indexed account, bool exempt);
+    
+    /// @notice Emitted when a payment category is enabled or disabled
+    event CategoryStatusUpdated(uint8 indexed category, bool enabled);
+    /// @notice Emitted when category statistics are updated
+    event CategoryStatsUpdated(uint8 indexed category, uint256 txCount, uint256 totalVolume);
+    /// @notice Emitted when a new payment category is added
+    event CategoryAdded(uint8 indexed categoryId, string name);
+    /// @notice Emitted when an existing payment category is updated
+    event CategoryUpdated(uint8 indexed categoryId, string name);
+    
+    /// @notice Emitted when velocity protection settings change
+    event VelocityLimitConfigured(bool enabled, uint256 maxTxPerWindow, uint256 timeWindow);
+    /// @notice Emitted when a transaction hits the velocity protection limit
+    event VelocityLimitTriggered(address indexed account, uint256 txCount, uint256 timeWindow);
+    /// @notice Emitted when velocity protection exemption for an address changes
+    event VelocityLimitExemptUpdated(address indexed account, bool exempt);
+    /// @notice Emitted when blacklist expiry is set or cleared
+    event BlacklistExpirySet(address indexed account, uint256 expiryTime);
+    /// @notice Emitted when whitelist expiry is set or cleared
+    event WhitelistExpirySet(address indexed account, uint256 expiryTime);
+    /// @notice Emitted when a DEX pair status is added or removed
+    event DexPairUpdated(address indexed pair, bool isPair);
+    /// @notice Emitted when emergency token withdrawal occurs
+    event EmergencyTokenWithdraw(address indexed token, address indexed to, uint256 amount);
 
     // ===================================================
     // MODIFIERS
     // ===================================================
     
-    /// @notice Restricts function access to contract Owner
+    /// @notice Restricts function access to the contract owner
     modifier onlyOwner() {
-        require(msg.sender == _owner, "E01");
+        if (msg.sender != _owner) revert AUTH_OWNER();
         _;
     }
     
-    /// @notice Restricts function execution when contract is not paused
-    modifier whenNotPaused() {
-        require(!_paused, "E02");
-        _;
-    }
-    
-    /// @notice Prevents recursive calls during liquidity operations
-    modifier lockTheSwap {
-        inSwapAndLiquify = true;
-        _;
-        inSwapAndLiquify = false;
-    }
-
-    /// @notice Simple reentrancy guard protection
+    /// @notice Simple reentrancy guard modifier
     modifier nonReentrant() {
-        require(!_entered, "E03");
+        if (_entered) revert SEC_REENTRY();
         _entered = true;
         _;
         _entered = false;
@@ -447,13 +519,93 @@ contract NTE is IERC20 {
     // CONSTRUCTOR
     // ===================================================
     
+    error SEC_REENTRY();
+    error AUTH_OWNER();
+    error AUTH_ZERO_OWNER();
+    error AUTH_LOCKED();
+    error AUTH_SAME_OWNER();
+    error AUTH_INVALID();
+    error SYS_PAUSED();
+    error SYS_DISABLED();
+    error DEX_ROUTER();
+    error DEX_FACTORY_ZERO();
+    error DEX_FACTORY();
+    error DEX_WETH_ZERO();
+    error DEX_WETH();
+    error DEX_PAIR_ZERO();
+    error DEX_PAIR_FAIL();
+    error DEX_PAIR_CHECK();
+    error DEX_WETH_CALL();
+    error DEX_FACTORY_CALL();
+    error TAX_BUY_HIGH();
+    error TAX_SELL_HIGH();
+    error TAX_XFER_HIGH();
+    error TAX_TOTAL_HIGH();
+    error TAX_COOLDOWN();
+    error TAX_BUY_DELTA();
+    error TAX_SELL_DELTA();
+    error TAX_XFER_DELTA();
+    error TAX_TREASURY_ZERO();
+    error TAX_TREASURY_SAME();
+    error BL_OWNER();
+    error BL_CONTRACT();
+    error BL_SENDER();
+    error BL_RECIPIENT();
+    error WL_REQUIRED();
+    error TXN_AMOUNT_ZERO();
+    error TXN_EXCEEDS_BAL();
+    error TXN_OVERFLOW();
+    error TXN_SUPPLY_ZERO();
+    error TXN_REPLAY();
+    error TXN_TAX_MISMATCH();
+    error ADDR_FROM_ZERO();
+    error ADDR_TO_ZERO();
+    error APRV_FROM_ZERO();
+    error APRV_TO_ZERO();
+    error APRV_OVERFLOW();
+    error APRV_UNDERFLOW();
+    error APRV_INSUFFICIENT();
+    error MINT_TO_ZERO();
+    error BURN_FROM_ZERO();
+    error BURN_EXCEEDS();
+    error MEV_VELOCITY();
+    error MEV_TOO_FAST();
+    error CD_SENDER();
+    error CD_RECIPIENT();
+    error CD_SELL();
+    error DUMP_PERCENT();
+    error DUMP_EXCEEDS();
+    error PRICE_MIN_IMPACT();
+    error PRICE_INVALID();
+    error PRICE_TOO_HIGH();
+    error CAT_INVALID();
+    error CAT_DISABLED();
+    error EMG_INVALID_TOKEN();
+    error EMG_ZERO_RECIP();
+    error EMG_INSUF_BAL();
+    error EMG_TRANSFER_FAIL();
+    error EMG_WAIT_30D();
+    error EMG_INVALID_RECIP();
+    error EMG_INSUF_BAL_BNB();
+    error EMG_BNB_FAIL();
+    error ADDR_INVALID();
+    error ADDR_ZERO();
+    error AUTH_ALREADY_SET();
+    error AUTH_NOT_SET();
+    error AUTH_ZERO_ADDR();
+    error SEC_BOT_ACTIVE();
+    error MEV_BLOCKS_HIGH();
+    error MEV_TIME_HIGH();
+    error CD_TOO_HIGH();
+
     /**
-     * @notice Initializes the NTE token contract with specified parameters
-     * @dev Sets up token metadata, tax system, PancakeSwap integration, and security features
-     * @param initialSupply Total tokens to create (without decimals, will be multiplied by 10^18)
-     * @param initialOwner Address that will own and control the contract
-     * @param _treasury Address that will receive tax payments (falls back to owner if zero)
-     * @param _pancakeRouter PancakeSwap router address for DEX integration (optional)
+     * @dev Sets up the initial state of the NTE token.
+     *      We initialize the supply, set the default taxes, and attempt to 
+     *      integrate with PancakeSwap right away to save time later.
+     * @param initialSupply How many tokens to start with (before decimals).
+     * @param initialOwner The address that will hold the initial supply and admin keys.
+     * @param _treasury Where the tax money goes (defaults to the owner if left empty).
+     * @param _pancakeRouter The PancakeSwap router address for auto-pairing.
      */
     constructor(
         uint256 initialSupply,
@@ -461,111 +613,86 @@ contract NTE is IERC20 {
         address _treasury,
         address _pancakeRouter
     ) {
-        // Validate inputs
-    require(initialOwner != address(0), "E04");
-    require(initialSupply > 0, "E05");
+        if (initialOwner == address(0)) revert AUTH_ZERO_OWNER();
+        if (initialSupply == 0) revert TXN_SUPPLY_ZERO();
         
-        // Set owner
+        _deploymentChainId = block.chainid;
         _owner = initialOwner;
         
-        // Set token info
         _name = "Node Meta Energy";
         _symbol = "NTE";
-        _decimals = 18;
         
-        // Setup tax system
         treasury = _treasury != address(0) ? _treasury : initialOwner;
         
-        // Basis points system (1 bp = 0.01%)
-        buyTaxBps = 200;        // 200 bp = 2% on buys
-        sellTaxBps = 200;       // 200 bp = 2% on sells
-        transferTaxBps = 300;   // 300 bp = 3% on transfers
+        buyTaxBps = 200;
+        sellTaxBps = 200;
+        transferTaxBps = 300;
         
-        // Setup PancakeSwap if router provided
         if (_pancakeRouter != address(0)) {
-            require(_isContract(_pancakeRouter), "E06");
+            if (!_isContract(_pancakeRouter)) revert DEX_ROUTER();
             
-            // Enhanced router validation
             try IPancakeRouter(_pancakeRouter).factory() returns (address factory) {
-                require(factory != address(0), "E07");
-                require(_isContract(factory), "E08");
+                if (factory == address(0)) revert DEX_FACTORY_ZERO();
+                if (!_isContract(factory)) revert DEX_FACTORY();
                 
                 try IPancakeRouter(_pancakeRouter).WETH() returns (address weth) {
-                    require(weth != address(0), "E09");
-                    require(_isContract(weth), "E10");
+                    if (weth == address(0)) revert DEX_WETH_ZERO();
+                    if (!_isContract(weth)) revert DEX_WETH();
                     
-                    // Additional security: check if router and factory are on the same network
                     try IPancakeFactory(factory).getPair(address(this), weth) returns (address existingPair) {
                         if (existingPair != address(0)) {
-                            // Pair already exists, use it
                             pancakePair = existingPair;
                             isPancakePair[pancakePair] = true;
                         } else {
-                            // Create new pair - if this fails, revert to ensure valid deployment
                             address newPair = IPancakeFactory(factory).createPair(address(this), weth);
-                            require(newPair != address(0), "E11");
+                            if (newPair == address(0)) revert DEX_PAIR_ZERO();
                             pancakePair = newPair;
                             isPancakePair[pancakePair] = true;
                         }
                         
-                        // Only set router if we successfully have a pair
-                        require(pancakePair != address(0), "E12");
+                        if (pancakePair == address(0)) revert DEX_PAIR_FAIL();
                         pancakeRouter = _pancakeRouter;
-                        taxExempt[_pancakeRouter] = true;
-                        _validatedRouters[_pancakeRouter] = true;
+                        // Router is NOT tax exempt to prevent arbitrage through direct router calls
                     } catch {
-                        revert("E13");
+                        revert DEX_PAIR_CHECK();
                     }
                 } catch {
-                    revert("E14");
+                    revert DEX_WETH_CALL();
                 }
             } catch {
-                revert("E15");
+                revert DEX_FACTORY_CALL();
             }
         }
         
-        // Set branding
-        _tokenLogo = "https://node-meta.com/logo/node-meta.png";
-        _description = "Node Meta Energy (NTE) - Revolutionary Blockchain Technology";
-        _website = "https://node-meta.com";
-        
-        
-        // Disable anti-dump
         antiDumpEnabled = false;
         maxSellPercentage = 100;
         sellCooldown = 0;
         
-        // Disable liquidity locking
-        liquidityLockEnabled = false;
+        whitelistEnabled = false;
         
-        // Initialize Auto-Liquidity (disabled by default)
-        autoLiquidityEnabled = false;
-        liquidityFeePercent = 0;              // 0% to liquidity initially
-        liquidityThreshold = 1000 * 10 ** 18; // 1000 tokens threshold
-        accumulatedLiquidityTokens = 0;
-        totalLiquidityAdded = 0;
-        lastLiquidityAddTime = block.timestamp;
-        autoLiquiditySlippageBps = 200;       // Default 2% slippage for auto-liquidity
+        totalCategories = 0;
         
-        // Initialize Price Impact Limits (disabled by default)
         priceImpactLimitEnabled = false;
-        maxPriceImpactPercent = 500;          // 5% max price impact
+        maxPriceImpactPercent = 500;
         
-        // Initialize Wallet Cooldown (disabled by default)
         walletCooldownEnabled = false;
-        globalCooldownSeconds = 30;           // 30 seconds default cooldown
+        globalCooldownSeconds = 30;
         
-        // Initialize MEV Protection (enabled by default)
         mevProtectionEnabled = true;
-        maxBlocksForMevProtection = 2;        // 2 blocks
-        minTimeBetweenTxs = 12;               // 12 seconds minimum between transactions
+        maxBlocksForMevProtection = 2;
+        minTimeBetweenTxs = 12;
         
-        // Enable anti-bot for 65 minutes
         antiBotEnabled = true;
-        antiBotDuration = 3900;  // 65 minutes
+        antiBotDuration = 3900;
         launchTime = block.timestamp;
         
-        // Create initial supply
+        velocityLimitEnabled = false;
+        maxTxPerWindow = 10;
+        velocityTimeWindow = 300;
+        
+        // Initialize tax change cooldown to deployment time
+        _lastTaxChangeTime = block.timestamp;
+        
         _mint(initialOwner, initialSupply * 10 ** _decimals);
     }
     
@@ -574,57 +701,45 @@ contract NTE is IERC20 {
     // ===================================================
     
     /**
-     * @notice Returns the token name
-     * @dev Standard ERC20 function for display purposes
-     * @return Token name string
+     * @notice Returns the token name.
      */
     function name() public view returns (string memory) {
         return _name;
     }
     
     /**
-     * @notice Returns the token symbol
-     * @dev Standard ERC20 function for display purposes
-     * @return Token symbol string
+     * @notice Returns the token symbol (ticker).
      */
     function symbol() public view returns (string memory) {
         return _symbol;
     }
     
     /**
-     * @notice Returns the number of decimal places
-     * @dev Standard ERC20 function, determines token precision
-     * @return Number of decimal places (18)
+     * @notice Returns how many decimal places the token uses.
      */
-    function decimals() public view returns (uint8) {
+    function decimals() public pure returns (uint8) {
         return _decimals;
     }
     
     /**
-     * @notice Returns the total token supply
-     * @dev Standard ERC20 function
-     * @return Total number of tokens in existence
+     * @notice Returns the total amount of tokens currently in circulation.
      */
     function totalSupply() public view override returns (uint256) {
         return _totalSupply;
     }
     
     /**
-     * @notice Returns the token balance of an account
-     * @dev Standard ERC20 function
-     * @param account Address to check balance for
-     * @return Token balance of the account
+     * @notice Checks how many tokens a specific wallet is holding.
+     * @param account The address to check.
      */
     function balanceOf(address account) public view override returns (uint256) {
         return _balances[account];
     }
     
     /**
-     * @notice Transfer tokens to another address
-     * @dev Standard ERC20 transfer with tax logic applied
-     * @param to Recipient address
-     * @param amount Number of tokens to transfer
-     * @return True if transfer succeeds
+     * @notice Moves tokens from your wallet to someone else's.
+     * @param to The lucky recipient.
+     * @param amount How many tokens to send.
      */
     function transfer(address to, uint256 amount) public override returns (bool) {
         _transferWithTax(msg.sender, to, amount);
@@ -632,21 +747,16 @@ contract NTE is IERC20 {
     }
     
     /**
-     * @notice Returns the remaining number of tokens that spender is allowed to spend
-     * @dev Standard ERC20 allowance function
-     * @param account Token owner address
-     * @param spender Address allowed to spend tokens
-     * @return Remaining allowance amount
+     * @notice Checks how many tokens a spender is allowed to use on your behalf.
      */
     function allowance(address account, address spender) public view override returns (uint256) {
         return _allowances[account][spender];
     }
     
     /**
-     * @notice Approve another address to spend tokens on your behalf
-     * @param spender Address to approve for spending
-     * @param amount Maximum amount to approve
-     * @return True if approval succeeds
+     * @notice Giving someone permission to spend your tokens.
+     * @param spender The person or contract you're authorizing.
+     * @param amount The limit of how many tokens they can spend.
      */
     function approve(address spender, uint256 amount) public override returns (bool) {
         _approve(msg.sender, spender, amount);
@@ -654,12 +764,10 @@ contract NTE is IERC20 {
     }
     
     /**
-     * @notice Transfer tokens from one address to another using allowance
-     * @dev Standard ERC20 transferFrom with tax logic applied
-     * @param from Address to transfer from
-     * @param to Address to transfer to
-     * @param amount Number of tokens to transfer
-     * @return True if transfer succeeds
+     * @notice Moving tokens from one person to another using a pre-approved allowance.
+     * @param from Where the tokens are coming from.
+     * @param to Where the tokens are going.
+     * @param amount How many tokens to move.
      */
     function transferFrom(address from, address to, uint256 amount) public override returns (bool) {
         _spendAllowance(from, msg.sender, amount);
@@ -668,80 +776,452 @@ contract NTE is IERC20 {
     }
 
     // ===================================================
-    // CUSTOM TRANSFER FUNCTIONS - Show on BscScan
+    // PAYMENT CATEGORIZATION TRANSFER FUNCTIONS
     // ===================================================
     
     /**
-     * @notice Transfer tokens for purchase
-     * @dev Shows as "Buy" on BscScan - same as transfer but with custom event
-     * @param to Recipient address
-     * @param amount Number of tokens to transfer
-     * @return True if transfer succeeds
+     * @notice Send tokens with a specific "Category" and a personal memo.
+    * @dev This is a special transfer that requires a digital signature from an
+    *      authorized off-chain signer (for example, a backend for your app or website).
+    *      It's great for business payments or tagging rewards.
+     *      We use a nonce, chainId, and the contract address to make sure nobody 
+     *      can "replay" or steal your transaction data.
+     * @param to Who is receiving the tokens.
+     * @param amount How many tokens to send.
+     * @param category The ID of the category (e.g., 1 for 'Business').
+    * @param signature The secure signature from an authorized backend signer.
+     * @param nonce Your current transaction count (to prevent double-spending).
+     * @param txReference An invoice or order number for your records.
+     * @param memo A short note about the transfer.
+     * @return True if everything went smoothly.
      */
-  /*   function Purchase(address to, uint256 amount) external returns (bool) {
+    function _transactionInternal(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) internal returns (bool) {
+        // Validate nonce matches expected value to prevent replay attacks
+        uint256 expectedNonce = userCategorizedNonce[msg.sender];
+        if (nonce != expectedNonce) revert TXN_REPLAY();
+
+        // Construct the hash that was signed (includes contract address and cached chain ID to prevent cross-chain replay)
+        bytes32 messageHash = keccak256(abi.encodePacked(
+            address(this),
+            msg.sender,
+            to,
+            amount,
+            category,
+            txReference,
+            nonce,
+            _deploymentChainId
+        ));
+        
+        // Follow Ethereum signed message standard (EIP-191)
+        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
+        
+        // Recover the signer - zero address check first to fail fast
+        address signer = _recoverSigner(ethSignedMessageHash, signature);
+        if (signer == address(0)) revert AUTH_ZERO_ADDR();
+        if (!isAuthSigner[signer]) revert AUTH_INVALID();
+
+        if (category >= totalCategories) revert CAT_INVALID();
+        if (!categoryEnabled[category]) revert CAT_DISABLED();
+        
+        // Validate string lengths to prevent gas griefing
+        if (bytes(txReference).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
+        if (bytes(memo).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
+        
+        // Execute transfer first - only update state if successful
         _transferWithTax(msg.sender, to, amount);
+        
+        // Update statistics with proper overflow protection
+        unchecked {
+            // Use >= to prevent wrap at max-1
+            if (categoryTransactionCount[category] >= type(uint256).max) revert TXN_OVERFLOW();
+            categoryTransactionCount[category]++;
+            
+            if (categoryTotalVolume[category] > type(uint256).max - amount) revert TXN_OVERFLOW();
+            categoryTotalVolume[category] += amount;
+            
+            if (userCategoryCount[msg.sender][category] >= type(uint256).max) revert TXN_OVERFLOW();
+            userCategoryCount[msg.sender][category]++;
+            
+            if (userCategoryVolume[msg.sender][category] > type(uint256).max - amount) revert TXN_OVERFLOW();
+            userCategoryVolume[msg.sender][category] += amount;
+        }
+        
+        // Rolling buffer logic - always overwrite at current index for consistent gas cost
+        CategorizedTransaction memory newTx = CategorizedTransaction({
+            from: msg.sender,
+            to: to,
+            amount: amount,
+            category: category,
+            txReference: txReference,
+            memo: memo,
+            timestamp: block.timestamp
+        });
+
+        // Use modular index for circular buffer (consistent gas regardless of buffer state)
+        uint256 currentIndex = _categorizedTxCounter % MAX_STORED_TXS;
+        if (recentCategorizedTxs.length < MAX_STORED_TXS) {
+            // Initial fill - push is required but index already determined
+            recentCategorizedTxs.push(newTx);
+        } else {
+            // Overwrite existing entry
+            recentCategorizedTxs[currentIndex] = newTx;
+        }
+        _categorizedTxCounter++;
+        
+        // Increment nonce after successful transfer to prevent gaps on transfer failures
+        userCategorizedNonce[msg.sender] = expectedNonce + 1;
+        
+        // Emit events
+        emit transactionProcessed(msg.sender, to, amount, category, txReference, memo);
+        emit CategoryStatsUpdated(category, categoryTransactionCount[category], categoryTotalVolume[category]);
+        
         return true;
     }
-    */
+
+    /**
+     * @notice Main function for category-based transactions.
+     */
+    
+    function Transaction(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
     
     /**
-     * @notice Claim
-     * @dev Shows as "Claim" on BscScan
-     * @param to Recipient address (usually caller's wallet)
-     * @param amount Number of tokens to claim
-     * @return True if transfer succeeds
+     * @notice Convenience wrapper for category-based transactions tagged as "Payment".
      */
- /*    function Claim(address to, uint256 amount) external returns (bool) {
-        _transferWithTax(msg.sender, to, amount);
-        return true;
+    function Payment(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
     }
- */
+
     /**
-     * @notice Burn (permanently destroy) your own tokens
-     * @dev Reduces total supply by burning tokens from sender's balance
-     * @param amount Number of tokens to burn
+     * @notice Convenience wrapper for category-based transactions tagged as "Reward".
+     */
+    function Reward(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Bonus".
+     */
+    function Bonus(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Payout".
+     */
+    function Payout(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Deposit".
+     */
+    function Deposit(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Withdrawal".
+     */
+    function Withdrawal(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Purchase".
+     */
+    function Purchase(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Refund".
+     */
+    function Refund(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Fee".
+     */
+    function Fee(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Subscription".
+     */
+    function Subscription(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+    
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Sell".
+     */
+    function Sell(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Gift".
+     */
+    function Gift(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+
+    /**
+     * @notice Convenience wrapper for category-based transactions tagged as "Others".
+     */
+    function Others(
+        address to,
+        uint256 amount,
+        uint8 category,
+        bytes calldata signature,
+        uint256 nonce,
+        string calldata txReference,
+        string calldata memo
+    ) external returns (bool) {
+        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
+    }
+    
+    /**
+     * @notice Returns the display name of a payment category.
+     * @param category The ID of the category to query.
+     * @return The string name of the category.
+     */
+    function getCategoryName(uint8 category) external view returns (string memory) {
+        if (category >= totalCategories) revert CAT_INVALID();
+        return categoryNames[category];
+    }
+    
+    /**
+     * @notice Enables or disables a specific payment category.
+     * @param category The ID of the category to update.
+     * @param enabled True to enable, false to disable.
+     */
+    function setCategoryEnabled(uint8 category, bool enabled) external onlyOwner {
+        if (category >= totalCategories) revert CAT_INVALID();
+        categoryEnabled[category] = enabled;
+        emit CategoryStatusUpdated(category, enabled);
+    }
+    
+    /**
+     * @notice Updates the display name of an existing category.
+     * @param category The ID of the category to update.
+     * @param newName The new name for the category.
+     */
+    function updateCategoryName(uint8 category, string calldata newName) external onlyOwner {
+        if (category >= totalCategories) revert CAT_INVALID();
+        if (bytes(newName).length == 0) revert ADDR_INVALID();
+        if (bytes(newName).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
+        categoryNames[category] = newName;
+        emit CategoryUpdated(category, newName);
+    }
+    
+    /**
+     * @notice Adds a new payment category to the system.
+     * @param categoryName The name of the new category.
+     * @return categoryId The ID assigned to the new category.
+     */
+    function addCategory(string calldata categoryName) external onlyOwner returns (uint8 categoryId) {
+        if (bytes(categoryName).length == 0) revert ADDR_INVALID();
+        if (bytes(categoryName).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
+        if (totalCategories == 255) revert CAT_INVALID();
+        
+        categoryId = totalCategories;
+        categoryNames[categoryId] = categoryName;
+        categoryEnabled[categoryId] = true;
+        totalCategories++;
+        
+        emit CategoryAdded(categoryId, categoryName);
+        return categoryId;
+    }
+
+    /**
+     * @notice Authorizes a new off-chain signer for categorized transfers.
+     * @dev Signer addresses should be managed securely (e.g., using a HSM, KMS, or backend service).
+     * @param authAddress The address of the off-chain signer (website, app, or service backend).
+     */
+    function addAuthSigner(address authAddress) external onlyOwner {
+        if (authAddress == address(0)) revert ADDR_ZERO();
+        if (isAuthSigner[authAddress]) revert AUTH_ALREADY_SET();
+        isAuthSigner[authAddress] = true;
+        emit AuthSignerAdded(authAddress);
+    }
+
+    /**
+     * @notice Revokes authorization from an off-chain signer.
+     * @param authAddress The address to remove from the authorized list.
+     */
+    function removeAuthSigner(address authAddress) external onlyOwner {
+        if (!isAuthSigner[authAddress]) revert AUTH_NOT_SET();
+        isAuthSigner[authAddress] = false;
+        emit AuthSignerRemoved(authAddress);
+    }
+
+    /**
+     * @notice Burns tokens from the caller's balance, reducing the total supply.
+     * @param amount The number of tokens to be destroyed.
      */
     function burn(uint256 amount) external {
         _burn(msg.sender, amount);
     }
     
     /**
-     * @notice Check if the contract is currently paused
-     * @dev Returns pause state for emergency control
-     * @return True if contract is paused
+     * @notice Checks if the contract is currently in a paused state.
+     * @return True if the contract is paused, otherwise false.
      */
     function paused() public view returns (bool) {
         return _paused;
     }
     
     /**
-     * @notice Returns the current contract owner
-     * @dev Shows who has administrative control
-     * @return Current owner address
+     * @notice Returns the address of the current contract owner.
+     * @return The address of the owner.
      */
     function owner() public view returns (address) {
         return _owner;
     }
     
     /**
-     * @notice Returns the token logo URL
-     * @dev Used for metadata display in wallets and explorers
-     * @return Token logo URL string
+     * @notice Returns the URL pointing to the token's official logo.
+     * @return The logo metadata URL string.
      */
-    function tokenURI() public view returns (string memory) {
+    function tokenURI() public pure returns (string memory) {
         return _tokenLogo;
     }
     
     /**
-     * @notice Returns comprehensive token information
-     * @dev Provides all basic token details for display purposes
-     * @return tokenName Current token name
-     * @return tokenSymbol Current token symbol  
-     * @return tokenDecimals Number of decimal places
-     * @return tokenTotalSupply Current total supply
-     * @return logo Token logo URL
-     * @return description Token description
-     * @return website Official website URL
+     * @notice Returns the nonce for categorized transfers for an account.
+     * @param account The address to check.
+     * @return The current nonce.
+     */
+    function getCategorizedNonce(address account) public view returns (uint256) {
+        return userCategorizedNonce[account];
+    }
+    
+    /**
+     * @notice Returns a comprehensive summary of token metadata.
+     * @return tokenName The full name of the token.
+     * @return tokenSymbol The ticker symbol of the token.
+     * @return tokenDecimals The number of decimal places used.
+     * @return tokenTotalSupply The current total circulating supply.
+     * @return logo The token's logo URI.
+     * @return description A brief project description.
+     * @return website The official project website URL.
      */
     function getTokenInfo() public view returns (
         string memory tokenName,
@@ -756,14 +1236,13 @@ contract NTE is IERC20 {
     }
     
     /**
-     * @notice Returns current tax configuration settings in basis points
-     * @dev Shows precise tax rates and exempt addresses
-     * @return buyTax Current buy tax in basis points
-     * @return sellTax Current sell tax in basis points
-     * @return transferTax Current transfer tax in basis points
-     * @return treasuryAddr Treasury address receiving tax proceeds
-     * @return routerExempt Whether router is tax exempt
-     * @return pairExempt Whether main pair is tax exempt
+     * @notice Returns the current tax configuration settings.
+     * @return buyTax The tax rate applied to buy transactions (in basis points).
+     * @return sellTax The tax rate applied to sell transactions (in basis points).
+     * @return transferTax The tax rate applied to wallet-to-wallet transfers (in basis points).
+     * @return treasuryAddr The address where collected taxes are sent.
+     * @return routerExempt Indicates if the main DEX router is exempt from taxes.
+     * @return pairExempt Indicates if the main DEX pair is exempt from taxes.
      */
     function getTaxConfiguration() public view returns (
         uint256 buyTax,
@@ -788,9 +1267,8 @@ contract NTE is IERC20 {
     // ============================================
     
     /**
-     * @notice Owner: Pauses all token transfers and trading
-     * @dev Emergency function to stop all token operations
-     * @param includeOwner If true, owner is also paused; if false, owner can still transact
+     * @notice Owner: pauses all token transfers and trading.
+     * @param includeOwner If true, owner is also blocked while paused.
      */
     function pause(bool includeOwner) external onlyOwner {
         _paused = true;
@@ -799,8 +1277,7 @@ contract NTE is IERC20 {
     }
     
     /**
-     * @notice Owner: Resumes normal token operations after pause
-     * @dev Restores all transfer and trading functionality
+     * @notice Owner: unpauses the contract and resumes trading.
      */
     function unpause() external onlyOwner {
         _paused = false;
@@ -809,413 +1286,453 @@ contract NTE is IERC20 {
     }
     
     /**
-     * @notice Owner: Permanently renounces ownership (IRREVERSIBLE)
-     * @dev Can only be called 30 days after launch for safety
+     * @notice Renounces contract ownership, making the contract ownerless.
+     * @dev Only possible 30 days after launch for security.
      */
     function renounceOwnership() public onlyOwner {
-        require(block.timestamp > launchTime + 30 days, "E17");
+        if (block.timestamp <= launchTime + 30 days) revert AUTH_LOCKED();
         address previousOwner = _owner;
         _owner = address(0);
         emit OwnershipTransferred(previousOwner, address(0));
     }
     
     /**
-     * @notice Owner: Transfers ownership in a single step
-     * @dev Replaces the previous 2-step flow to reduce size and complexity
-     * @param newOwner Address of the new owner (cannot be zero or current owner)
+     * @notice Transfers contract ownership to a new address.
+     * @param newOwner The address of the new owner.
      */
     function transferOwnership(address newOwner) external onlyOwner {
-        require(newOwner != address(0), "E18");
-        require(newOwner != _owner, "E19");
+        if (newOwner == address(0)) revert AUTH_ZERO_OWNER();
+        if (newOwner == _owner) revert AUTH_SAME_OWNER();
         address previousOwner = _owner;
         _owner = newOwner;
         emit OwnershipTransferred(previousOwner, newOwner);
     }
     
+    /// @notice Maximum allowed sell tax (safety limit)
+    uint256 public constant MAX_SELL_TAX_LIMIT = 2500;
+    
     /**
-     * @notice Owner: Sets tax rates using basis points for precision
-     * @dev Allows precise tax control with 0.01% increments
-     * @param newBuyTaxBps Buy tax in basis points (0-2500, 150 = 1.5%)
-     * @param newSellTaxBps Sell tax in basis points (0-2500, 250 = 2.5%)
-     * @param newTransferTaxBps Transfer tax in basis points (0-2500)
+     * @notice Get a quick estimate of what happens when you sell.
+     * @dev This is great for transparency. It calculates the taxes and 
+     *      the expected "Price Impact" so you aren't surprised by the result.
+     * @param amount The number of tokens you're thinking of selling.
+     * @return netOutput What you'll actually receive after taxes.
+     * @return taxAmount How many tokens go to the treasury.
+     * @return impactBps The price impact (100 = 1% move in price).
+     */
+    function checkSellability(uint256 amount) external view returns (
+        uint256 netOutput,
+        uint256 taxAmount,
+        uint256 impactBps
+    ) {
+        if (amount == 0) revert TXN_AMOUNT_ZERO();
+        
+        // 1. Calculate Tax
+        taxAmount = (amount * sellTaxBps) / BASIS_POINTS;
+        netOutput = amount - taxAmount;
+        
+        // 2. Calculate Price Impact
+        impactBps = _calculatePriceImpact(amount);
+        
+        return (netOutput, taxAmount, impactBps);
+    }
+
+    /**
+     * @notice Updates the tax rates for buy, sell, and transfer transactions.
+     * @dev Rates are in basis points (100 = 1%). Subject to safety limits and cooldown.
+     * @param newBuyTaxBps New buy tax rate.
+     * @param newSellTaxBps New sell tax rate.
+     * @param newTransferTaxBps New transfer tax rate.
      */
     function setAllTaxBasisPoints(
         uint256 newBuyTaxBps,
         uint256 newSellTaxBps,
         uint256 newTransferTaxBps
     ) external onlyOwner {
-    require(newBuyTaxBps <= 2500, "E24");
-    require(newSellTaxBps <= 2500, "E25");
-    require(newTransferTaxBps <= 2500, "E26");
+        if (newBuyTaxBps > 2500) revert TAX_BUY_HIGH();
+        if (newSellTaxBps > MAX_SELL_TAX_LIMIT) revert TAX_SELL_HIGH();
+        if (newTransferTaxBps > 2500) revert TAX_XFER_HIGH();
+        if (newBuyTaxBps + newSellTaxBps + newTransferTaxBps > 5000) revert TAX_TOTAL_HIGH();
+        if (block.timestamp < _lastTaxChangeTime + TAX_CHANGE_COOLDOWN) revert TAX_COOLDOWN();
         
-        // Total tax validation - max 50% (5000 bp) combined
-    require(newBuyTaxBps + newSellTaxBps + newTransferTaxBps <= 5000, "E27");
+        uint256 buyChange = newBuyTaxBps > buyTaxBps ? newBuyTaxBps - buyTaxBps : buyTaxBps - newBuyTaxBps;
+        uint256 sellChange = newSellTaxBps > sellTaxBps ? newSellTaxBps - sellTaxBps : sellTaxBps - newSellTaxBps;
+        uint256 transferChange = newTransferTaxBps > transferTaxBps ? newTransferTaxBps - transferTaxBps : transferTaxBps - newTransferTaxBps;
         
-        // Rate limiting - prevent rapid tax changes
-    require(block.timestamp >= _lastTaxChangeTime + TAX_CHANGE_COOLDOWN, "E28");
-        
-        // Limit individual tax changes (250 bp = 2.5% max change per update)
-        uint256 buyChange = newBuyTaxBps > buyTaxBps ? 
-            newBuyTaxBps - buyTaxBps : buyTaxBps - newBuyTaxBps;
-        uint256 sellChange = newSellTaxBps > sellTaxBps ? 
-            newSellTaxBps - sellTaxBps : sellTaxBps - newSellTaxBps;
-        uint256 transferChange = newTransferTaxBps > transferTaxBps ? 
-            newTransferTaxBps - transferTaxBps : transferTaxBps - newTransferTaxBps;
-        
-    require(buyChange <= 250, "E29");
-    require(sellChange <= 250, "E30");
-    require(transferChange <= 250, "E31");
+        if (buyChange > 250) revert TAX_BUY_DELTA();
+        if (sellChange > 250) revert TAX_SELL_DELTA();
+        if (transferChange > 250) revert TAX_XFER_DELTA();
         
         buyTaxBps = newBuyTaxBps;
         sellTaxBps = newSellTaxBps;
         transferTaxBps = newTransferTaxBps;
-        
         _lastTaxChangeTime = block.timestamp;
+        
+        emit TaxRatesUpdated(newBuyTaxBps, newSellTaxBps, newTransferTaxBps);
     }
     
     /**
-     * @notice Owner: Adds or removes tax exemption for address
-     * @dev Exempt addresses don't pay taxes on transfers
-     * @param user Wallet address to modify exemption for
-     * @param exempt True to exempt, false to apply normal taxes
+     * @notice Sets the tax exemption status for a specific address.
+     * @param user The address to update.
+     * @param exempt True to exempt, false to apply taxes.
      */
     function setTaxExempt(address user, bool exempt) external onlyOwner {
-        require(user != address(0), "E32");
+        if (user == address(0)) revert ADDR_INVALID();
         taxExempt[user] = exempt;
         emit TaxExemptUpdated(user, exempt);
     }
     
-
+    /**
+     * @notice Manages the blacklist status for a specific address.
+     * @param account The address to blacklist or unblacklist.
+     * @param blacklisted True to blacklist, false to unblacklist.
+     * @param expiryTime Timestamp when the blacklist expires (0 for permanent).
+     */
+    function setBlacklist(address account, bool blacklisted, uint256 expiryTime) external onlyOwner {
+        if (account == address(0)) revert ADDR_INVALID();
+        if (account == _owner) revert BL_OWNER();
+        if (account == address(this)) revert BL_CONTRACT();
+        isBlacklisted[account] = blacklisted;
+        if (blacklisted && expiryTime > 0) {
+            if (expiryTime <= block.timestamp) revert ADDR_INVALID();
+            blacklistExpiry[account] = expiryTime;
+            emit BlacklistExpirySet(account, expiryTime);
+        } else {
+            blacklistExpiry[account] = 0;
+        }
+        emit BlacklistUpdated(account, blacklisted);
+    }
 
     /**
-     * @notice Owner: Updates treasury address for tax payments
-     * @dev Changes where tax revenue is sent for future collections
-     * @param newTreasury New wallet address to receive tax payments
+     * @notice Toggles the whitelist-only trading mode.
+     * @param enabled True to enable whitelist-only mode.
+     */
+    function setWhitelistMode(bool enabled) external onlyOwner {
+        whitelistEnabled = enabled;
+        emit WhitelistModeUpdated(enabled);
+    }
+
+    /**
+     * @notice Manages the whitelist status for a specific address.
+     * @param account The address to whitelist or unwhitelist.
+     * @param whitelisted True to whitelist, false to unwhitelist.
+     * @param expiryTime Timestamp when the whitelist expires (0 for permanent).
+     */
+    function setWhitelist(address account, bool whitelisted, uint256 expiryTime) external onlyOwner {
+        if (account == address(0)) revert ADDR_INVALID();
+        isWhitelisted[account] = whitelisted;
+        if (whitelisted && expiryTime > 0) {
+            if (expiryTime <= block.timestamp) revert ADDR_INVALID();
+            whitelistExpiry[account] = expiryTime;
+            emit WhitelistExpirySet(account, expiryTime);
+        } else {
+            whitelistExpiry[account] = 0;
+        }
+        emit WhitelistUpdated(account, whitelisted);
+    }
+
+    /**
+     * @notice Updates the treasury address.
+     * @param newTreasury The proposed new treasury address.
      */
     function setTreasury(address newTreasury) external onlyOwner {
-        require(newTreasury != address(0), "E35");
-        require(newTreasury != treasury, "E36");
+        if (newTreasury == address(0)) revert TAX_TREASURY_ZERO();
+        if (newTreasury == treasury) revert TAX_TREASURY_SAME();
+        
         treasury = newTreasury;
-        emit MetadataUpdated("M01");
+        
+        emit TreasuryUpdated(newTreasury);
+        emit MetadataUpdated("TREASURY_UPDATED");
     }
-    
-    
-    
+
     /**
-     * @notice Owner: Configure anti-dump protection to prevent large price crashes.
-     * @dev Set limits on how much of the total supply can be sold at once and cooldown periods.
-     * @param enabled True to enable anti-dump protection, false to disable.
-     * @param maxPercentage Maximum percentage of total supply sellable per transaction (0-100).
-     * @param cooldownTime Seconds users must wait between large sells.
+     * @notice Configures anti-dump protection settings.
+     * @param enabled True to enable anti-dump logic.
+     * @param maxPercentage Max percentage of total supply allowed per sell.
+     * @param cooldownTime Cooldown period between large sells.
      */
     function setAntiDumpConfig(bool enabled, uint256 maxPercentage, uint256 cooldownTime) external onlyOwner {
-        require(maxPercentage > 0 && maxPercentage <= 100, "E38");
-        
+        if (maxPercentage == 0 || maxPercentage > 100) revert DUMP_PERCENT();
+        if (cooldownTime > MAX_ANTI_DUMP_COOLDOWN) revert CD_TOO_HIGH();
         antiDumpEnabled = enabled;
         maxSellPercentage = maxPercentage;
         sellCooldown = cooldownTime;
         emit AntiDumpConfigUpdated(enabled, maxPercentage, cooldownTime);
     }
- 
     
     /**
-     * @notice Owner: Configure automatic liquidity addition system
-     * @dev Enable/disable auto-liquidity and set parameters for automatic LP token creation
-     * @param enabled True to enable auto-liquidity, false to disable
-     * @param feePercent Percentage of tax allocated to liquidity (0-100)
-     * @param threshold Minimum tokens required before triggering auto-liquidity
-     * 
-     * Example: setAutoLiquidityConfig(true, 50, 1000 * 10**18)
-     * This allocates 50% of collected taxes to liquidity, triggers at 1000 tokens
+     * @notice Configures price impact limit settings for DEX sells.
+     * @param enabled True to enable price impact limits.
+     * @param maxImpactBasisPoints Maximum allowed price impact in basis points.
      */
-    function setAutoLiquidityConfig(
-        bool enabled,
-        uint256 feePercent,
-        uint256 threshold
-    ) external onlyOwner {
-        require(feePercent >= 0 && feePercent <= 100, "E42");
-        require(threshold >= 0, "E43");
-        require(threshold > 0 || !enabled, "E44");
-        
-        autoLiquidityEnabled = enabled;
-        liquidityFeePercent = feePercent;
-        liquidityThreshold = threshold;
-        
-        emit AutoLiquidityConfigUpdated(enabled, feePercent, threshold);
-    }
-    
-    /**
-     * @notice Owner: Configure slippage for auto-liquidity swaps
-     * @dev Set the maximum allowed slippage for automated swaps to prevent front-running
-     * @param newSlippageBps Slippage in basis points (e.g., 50 = 0.5%, 200 = 2%)
-     * 
-     * Example: setAutoLiquiditySlippage(200)
-     * This sets a 2% slippage tolerance for auto-liquidity swaps
-     */
-    function setAutoLiquiditySlippage(uint256 newSlippageBps) external onlyOwner {
-        require(newSlippageBps >= MIN_SLIPPAGE_BPS, "E45");
-        require(newSlippageBps <= MAX_SLIPPAGE_BPS, "E46");
-        require(newSlippageBps > 0, "E47");
-        autoLiquiditySlippageBps = newSlippageBps;
-        emit AutoLiquiditySlippageUpdated(newSlippageBps);
-    }
-    
-    /**
-     * @notice Owner: Configure price impact protection limits
-     * @dev Set maximum allowed price impact for trades to prevent large dumps
-     * @param enabled True to enable price impact limits, false to disable
-     * @param maxImpactBasisPoints Maximum price impact in basis points (100 = 1%, 500 = 5%)
-     * 
-     * Example: setPriceImpactLimitConfig(true, 500)
-     * This limits any trade to max 5% price impact
-     */
-    function setPriceImpactLimitConfig(
-        bool enabled,
-        uint256 maxImpactBasisPoints
-    ) external onlyOwner {
-        require(maxImpactBasisPoints >= 10 || !enabled, "E48");
-        require(maxImpactBasisPoints <= 10000, "E49");
-        
+    function setPriceImpactLimitConfig(bool enabled, uint256 maxImpactBasisPoints) external onlyOwner {
+        if (enabled && maxImpactBasisPoints < 10) revert PRICE_MIN_IMPACT();
+        if (maxImpactBasisPoints > 10000) revert PRICE_INVALID();
         priceImpactLimitEnabled = enabled;
         maxPriceImpactPercent = maxImpactBasisPoints;
-        
         emit PriceImpactLimitConfigUpdated(enabled, maxImpactBasisPoints);
     }
     
     /**
-     * @notice Owner: Exempt specific addresses from price impact limits
-     * @dev Allow certain addresses (like owner, treasury) to bypass price impact checks
-     * @param account Address to exempt or un-exempt
-     * @param exempt True to exempt from price impact limits, false to apply normal limits
-     * 
-     * Example: setPriceImpactExempt(treasuryAddress, true)
+     * @notice Sets the price impact exemption status for a specific address.
+     * @param account The address to update.
+     * @param exempt True to exempt, false to apply limits.
      */
     function setPriceImpactExempt(address account, bool exempt) external onlyOwner {
-        require(account != address(0), "E32");
+        if (account == address(0)) revert ADDR_INVALID();
         priceImpactExempt[account] = exempt;
         emit PriceImpactExemptUpdated(account, exempt);
     }
     
     /**
-     * @notice Owner: Configures wallet cooldown system
-     * @dev Sets cooldown period between trades to prevent bot spam
-     * @param enabled True to enable cooldown, false to disable
-     * @param cooldownSeconds Global cooldown time in seconds
+     * @notice Configures the global wallet cooldown settings.
+     * @param enabled True to enable wallet cooldowns.
+     * @param cooldownSeconds Number of seconds required between transactions.
      */
     function setWalletCooldownConfig(bool enabled, uint256 cooldownSeconds) external onlyOwner {
-        require(cooldownSeconds >= 0, "E50");
-        require(cooldownSeconds <= MAX_COOLDOWN, "E51"); 
-        
+        if (cooldownSeconds > MAX_COOLDOWN) revert CD_TOO_HIGH();
         walletCooldownEnabled = enabled;
         globalCooldownSeconds = cooldownSeconds;
         emit WalletCooldownConfigUpdated(enabled, cooldownSeconds);
     }
     
     /**
-     * @notice Owner: Manually trigger liquidity addition
-     * @dev Force auto-liquidity operation even if threshold not reached
-     * 
-     * Use this to manually add accumulated tokens to liquidity pool
-     */
-    function manualSwapAndLiquify() external onlyOwner nonReentrant {
-        require(pancakeRouter != address(0), "E52");
-        require(accumulatedLiquidityTokens > 0, "E53");
-        require(!autoLiquidityPaused, "E54");
-        _swapAndLiquify(accumulatedLiquidityTokens);
-    }
-    
-    /**
-     * @notice Owner: Lock liquidity pair tokens to prevent rug pulls and build trust.
-     * @dev Locks LP tokens in this contract for a specified time period. Locked tokens cannot be withdrawn early.
-     * @param pair The address of the liquidity pair (LP token contract address).
-     * @param amount Number of LP tokens to lock (in wei, check LP token decimals).
-     * @param lockPeriod How long to lock the tokens (in seconds, e.g., 31536000 = 1 year).
-     */
-    function lockLiquidity(address pair, uint256 amount, uint256 lockPeriod) external onlyOwner nonReentrant {
-        require(liquidityLockEnabled, "E55");
-        require(pair != address(0), "E56");
-        require(amount > 0, "E57");
-        require(lockPeriod > 0, "E58");
-        require(!liquidityLocks[pair].isLocked, "E59");
-        
-        IERC20 lpToken = IERC20(pair);
-    require(lpToken.balanceOf(msg.sender) >= amount, "E60");
-        
-        // EFFECTS: Update state BEFORE external call (CEI pattern)
-        // This prevents re-entrancy by marking the pair as locked before the transfer
-        uint256 unlockTime = block.timestamp + lockPeriod;
-        liquidityLocks[pair] = LiquidityLock({
-            amount: amount,
-            lockTime: block.timestamp,
-            unlockTime: unlockTime,
-            isLocked: true,
-            locker: msg.sender
-        });
-        
-        // INTERACTIONS: External call AFTER state update
-        // If this fails, the transaction reverts and state is rolled back
-    require(lpToken.transferFrom(msg.sender, address(this), amount), "E61");
-        
-        emit LiquidityLocked(pair, amount, unlockTime);
-    }
-    
-    /**
-     * @notice Owner: Unlock previously locked liquidity tokens after lock period expires.
-     * @dev Retrieve locked LP tokens once the lock period has ended. Cannot unlock early.
-     * @param pair The liquidity pair address that has locked tokens.
-     */
-    function unlockLiquidity(address pair) external onlyOwner nonReentrant {
-        LiquidityLock storage lock = liquidityLocks[pair];
-    require(lock.isLocked, "E62");
-    require(block.timestamp >= lock.unlockTime, "E63");
-        
-        uint256 amount = lock.amount;
-        lock.isLocked = false;
-        lock.amount = 0;
-        
-        IERC20(pair).transfer(lock.locker, amount);
-        emit LiquidityUnlocked(pair, amount);
-    }
-    
-    
-    /**
-     * @notice Owner: Rescue tokens accidentally sent to this contract.
-     * @dev Withdraw any ERC20 tokens that were mistakenly sent to this contract address.
-     * @param token The contract address of the token to rescue.
-     * @param to The address to send the rescued tokens to.
-     * @param amount The number of tokens to rescue.
+     * @notice Emergency function to withdraw stuck ERC20 tokens from the contract.
+    * @dev Can withdraw any ERC20 token held by this contract, including NTE.
+    * @param token The address of the token to withdraw.
+     * @param to The recipient address.
+     * @param amount The amount to withdraw.
      */
     function emergencyWithdrawToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
-        require(token != address(0), "E64");
-        require(to != address(0), "E65");
+        if (token == address(0)) revert EMG_INVALID_TOKEN();
+        if (to == address(0)) revert EMG_ZERO_RECIP();
         
+        // Check contract has sufficient balance
         uint256 contractBalance = IERC20(token).balanceOf(address(this));
-    require(contractBalance >= amount, "E66");
+        if (contractBalance < amount) revert EMG_INSUF_BAL();
         
-        if (liquidityLocks[token].isLocked && liquidityLocks[token].amount > 0) {
-        require(contractBalance - amount >= liquidityLocks[token].amount,
-            "E67");
+        // Use low-level call to handle non-standard ERC20 tokens
+        bytes memory payload = abi.encodeWithSelector(IERC20.transfer.selector, to, amount);
+        (bool success, bytes memory returndata) = token.call(payload);
+        
+        // Handle tokens that don't return a value or return false
+        if (!success) revert EMG_TRANSFER_FAIL();
+        if (returndata.length > 0) {
+            if (!abi.decode(returndata, (bool))) revert EMG_TRANSFER_FAIL();
         }
         
-    require(IERC20(token).transfer(to, amount), "E61");
+        emit EmergencyTokenWithdraw(token, to, amount);
     }
     
     /**
-     * @notice Owner: Set maximum allowed slippage for all operations
-     * @dev Sets a hard cap on slippage to prevent extreme price impact
-     * @param newMaxSlippage Maximum slippage in basis points (e.g., 1000 = 10%)
+     * @notice Emergency function to withdraw BNB from the contract.
+     * @dev Only possible 30 days after launch for security.
+     * @param to The recipient address.
+     * @param amount The amount to withdraw.
      */
-    function setMaxAllowedSlippage(uint256 newMaxSlippage) external onlyOwner {
-        require(newMaxSlippage >= MIN_SLIPPAGE_BPS, "E45");
-        require(newMaxSlippage <= ABSOLUTE_MAX_SLIPPAGE, "E68");
-        
-        uint256 oldSlippage = maxAllowedSlippage;
-        maxAllowedSlippage = newMaxSlippage;
-        emit MaxSlippageUpdated(oldSlippage, newMaxSlippage);
-    }
-
-    /**
-     * @notice Owner: Emergency withdraw BNB (Owner, after 30 days)
-     */
-    function emergencyWithdrawBNB(address payable to, uint256 amount) external onlyOwner {
-        require(block.timestamp > launchTime + 30 days, "E69");
-        require(to != address(0), "E70");
-        require(amount <= address(this).balance, "E71");
-        
+    function emergencyWithdrawBNB(address payable to, uint256 amount) external onlyOwner nonReentrant {
+        if (block.timestamp <= launchTime + 30 days) revert EMG_WAIT_30D();
+        if (to == address(0)) revert EMG_INVALID_RECIP();
+        if (amount > address(this).balance) revert EMG_INSUF_BAL_BNB();
         (bool success, ) = to.call{value: amount}("");
-    require(success, "E72");
+        if (!success) revert EMG_BNB_FAIL();
     }
 
     /**
-     * @notice Owner: Reset circuit breaker and resume auto-liquidity
-     * @dev Resets slippage failure counter and resumes auto-liquidity operations
+     * @notice Configures protection settings.
+     * @param enabled True to enable transaction protection.
+     * @param maxBlocks Maximum blocks allowed between transactions.
+     * @param minTime Minimum time in seconds allowed between transactions.
      */
-    function resetCircuitBreaker() external onlyOwner {
-        require(autoLiquidityPaused, "E73");
-        _consecutiveSlippageFailures = 0;
-        autoLiquidityPaused = false;
-        emit CircuitBreakerTriggered("M02");
-    }
+    function setMevProtectionConfig(bool enabled, uint256 maxBlocks, uint256 minTime) external onlyOwner {
+        // When enabling protection, at least one of the parameters must be non-zero
+        if (enabled && maxBlocks == 0 && minTime == 0) revert MEV_TIME_HIGH();
+        if (maxBlocks > 10) revert MEV_BLOCKS_HIGH();
+        if (minTime > 300) revert MEV_TIME_HIGH();
 
-    /**
-     * @notice Owner: Configures MEV protection settings
-     * @dev Sets parameters for detecting and preventing MEV attacks
-     * @param enabled True to enable MEV protection
-     * @param maxBlocks Maximum blocks between transactions for detection
-     * @param minTime Minimum seconds between transactions
-     */
-    function setMevProtectionConfig(
-        bool enabled,
-        uint256 maxBlocks,
-        uint256 minTime
-    ) external onlyOwner {
-    require(maxBlocks <= 10, "E74");
-    require(minTime <= 300, "E75");
-        
+        bool previous = mevProtectionEnabled;
         mevProtectionEnabled = enabled;
         maxBlocksForMevProtection = maxBlocks;
         minTimeBetweenTxs = minTime;
-        
         emit MevProtectionConfigured(enabled, maxBlocks, minTime);
+        if (previous != enabled) {
+            emit MevProtectionToggled(enabled);
+        }
     }
 
     /**
-     * @notice Owner: Sets MEV protection exemption for addresses
-     * @dev Allows certain addresses to bypass MEV protection
-     * @param account Address to exempt or un-exempt
-     * @param exempt True to exempt from MEV protection
+     * @notice Sets the protection exemption status for a specific address.
+     * @param account The address to update.
+     * @param exempt True to exempt, false to apply protection.
      */
     function setMevProtectionExempt(address account, bool exempt) external onlyOwner {
-        require(account != address(0), "E32");
+        if (account == address(0)) revert ADDR_INVALID();
         mevProtectionExempt[account] = exempt;
         emit MevProtectionExemptUpdated(account, exempt);
     }
+    
+    /**
+     * @notice Configures the transaction velocity protection settings.
+     * @param enabled True to enable velocity protection.
+     * @param maxTx Maximum allowed transactions per time window.
+     * @param timeWindow The duration of the time window in seconds.
+     */
+    function setVelocityLimitConfig(bool enabled, uint256 maxTx, uint256 timeWindow) external onlyOwner {
+        if (enabled) {
+            if (maxTx == 0 || timeWindow == 0) revert ADDR_INVALID();
+            if (maxTx > MAX_VELOCITY_BUFFER) revert CD_TOO_HIGH();
+            if (timeWindow > 86400) revert CD_TOO_HIGH();
+        }
+        velocityLimitEnabled = enabled;
+        maxTxPerWindow = maxTx;
+        velocityTimeWindow = timeWindow;
+        emit VelocityLimitConfigured(enabled, maxTx, timeWindow);
+    }
+    
+    /**
+     * @notice Sets the velocity protection exemption status for a specific address.
+     * @param account The address to update.
+     * @param exempt True to exempt, false to apply protection.
+     */
+    function setVelocityLimitExempt(address account, bool exempt) external onlyOwner {
+        if (account == address(0)) revert ADDR_INVALID();
+        velocityLimitExempt[account] = exempt;
+        emit VelocityLimitExemptUpdated(account, exempt);
+    }
+
+    /**
+     * @notice Returns a summary of MEV and velocity protection configuration.
+     * @return mevEnabled Whether MEV protection is enabled.
+     * @return maxBlocks Maximum allowed blocks between trades for MEV checks.
+     * @return minTime Minimum allowed time between trades for MEV checks.
+     * @return velocityEnabled Whether velocity protection is enabled.
+     * @return maxTx Maximum number of transactions allowed in the time window.
+     * @return timeWindow The duration of the velocity protection window in seconds.
+     */
+    function getProtectionConfig() external view returns (
+        bool mevEnabled,
+        uint256 maxBlocks,
+        uint256 minTime,
+        bool velocityEnabled,
+        uint256 maxTx,
+        uint256 timeWindow
+    ) {
+        return (
+            mevProtectionEnabled,
+            maxBlocksForMevProtection,
+            minTimeBetweenTxs,
+            velocityLimitEnabled,
+            maxTxPerWindow,
+            velocityTimeWindow
+        );
+    }
+    
+    /**
+     * @notice Checks if an address is currently blacklisted and the restriction is active.
+     * @param account The address to check.
+     * @return True if the address is blacklisted and the restriction has not expired.
+     */
+    function isBlacklistedActive(address account) public view returns (bool) {
+        if (!isBlacklisted[account]) return false;
+        if (blacklistExpiry[account] == 0) return true; // Permanent restriction
+        return block.timestamp < blacklistExpiry[account];
+    }
+    
+    /**
+     * @notice Cleans up expired blacklist entry for an account (callable by anyone).
+     * @param account The address to clean up.
+     */
+    function cleanExpiredBlacklist(address account) external {
+        if (isBlacklisted[account] && blacklistExpiry[account] != 0 && block.timestamp >= blacklistExpiry[account]) {
+            isBlacklisted[account] = false;
+            blacklistExpiry[account] = 0;
+            emit BlacklistUpdated(account, false);
+        }
+    }
+    
+    /**
+     * @notice Checks if an address is currently whitelisted and the permission is active.
+     * @param account The address to check.
+     * @return True if the address is whitelisted and the permission has not expired.
+     */
+    function isWhitelistedActive(address account) public view returns (bool) {
+        if (!isWhitelisted[account]) return false;
+        if (whitelistExpiry[account] == 0) return true; // Permanent permission
+        return block.timestamp < whitelistExpiry[account];
+    }
+    
+    /**
+     * @notice Cleans up expired whitelist entry for an account (callable by anyone).
+     * @param account The address to clean up.
+     */
+    function cleanExpiredWhitelist(address account) external {
+        if (isWhitelisted[account] && whitelistExpiry[account] != 0 && block.timestamp >= whitelistExpiry[account]) {
+            isWhitelisted[account] = false;
+            whitelistExpiry[account] = 0;
+            emit WhitelistUpdated(account, false);
+        }
+    }
+
+    /**
+     * @notice Registers or unregisters a DEX pair address for tax purposes.
+     * @dev Use this to add new liquidity pairs on other DEXes to prevent tax evasion.
+     * @param pair The address of the DEX pair contract.
+     * @param status True to register as a DEX pair, false to unregister.
+     */
+    function setDexPairStatus(address pair, bool status) external onlyOwner {
+        if (pair == address(0)) revert ADDR_INVALID();
+        if (!_isContract(pair)) revert DEX_ROUTER(); // Reuse error - pair must be a contract
+        // Prevent accidentally disabling the main pancakePair
+        if (pair == pancakePair && !status) revert DEX_PAIR_CHECK();
+        isPancakePair[pair] = status;
+        emit DexPairUpdated(pair, status);
+    }
 
     // ============================================
-    // INTERNAL FUNCTIONS - Not Callable Externally
+    // INTERNAL STUFF - For Our Eyes Only
     // ============================================
     
     /**
-     * @dev Creates new tokens and adds them to an account
-     * @param account Address to receive newly created tokens
-     * @param amount Number of tokens to create (in wei)
+     * @dev Simple internal function to create new tokens.
+     * @param account Who gets the new tokens.
+     * @param amount How many to create (remember the 18 decimals!).
      */
     function _mint(address account, uint256 amount) internal {
-        require(account != address(0), "E76");
+        if (account == address(0)) revert MINT_TO_ZERO();
         _totalSupply += amount;
         _balances[account] += amount;
         emit Transfer(address(0), account, amount);
     }
     
     /**
-     * @dev Destroys tokens from an account permanently
-     * @param account Address to burn tokens from
-     * @param amount Number of tokens to destroy (in wei)
+     * @dev Destroys tokens permanently.
+     * @param account Where the tokens are coming from.
+     * @param amount How many to burn.
      */
     function _burn(address account, uint256 amount) internal {
-        require(account != address(0), "E77");
+        if (account == address(0)) revert BURN_FROM_ZERO();
         uint256 accountBalance = _balances[account];
-        require(accountBalance >= amount, "E78");
+        if (accountBalance < amount) revert BURN_EXCEEDS();
         unchecked {
             _balances[account] = accountBalance - amount;
             _totalSupply -= amount;
+            totalBurned += amount;
         }
         emit Transfer(account, address(0), amount);
     }
     
     /**
-     * @dev Basic transfer function without tax or fee logic
-     * @param from Address sending the tokens
-     * @param to Address receiving the tokens
-     * @param amount Number of tokens to transfer (in wei)
+     * @dev The actual move-money logic. No taxes or rules here, just pure math.
+     * @param from Sender address.
+     * @param to Recipient address.
+     * @param amount Token amount.
      */
     function _transfer(address from, address to, uint256 amount) internal {
-        require(from != address(0), "E79");
-        require(to != address(0), "E80");
-        
+        if (from == address(0)) revert ADDR_FROM_ZERO();
+        if (to == address(0)) revert ADDR_TO_ZERO();
         
         uint256 fromBalance = _balances[from];
-    require(fromBalance >= amount, "E83");
+        if (fromBalance < amount) revert TXN_EXCEEDS_BAL();
         unchecked {
             _balances[from] = fromBalance - amount;
             _balances[to] += amount;
@@ -1225,520 +1742,330 @@ contract NTE is IERC20 {
     }
     
     /**
-     * @dev Sets spending allowance for a spender
-     * @param tokenOwner Address that owns the tokens
-     * @param spender Address allowed to spend the tokens
-     * @param amount Maximum tokens the spender can use
+     * @dev Helping with the Approval event and setting the allowance.
+     * @param tokenOwner Who owns the tokens.
+     * @param spender Who can spend them.
+     * @param amount The maximum they can use.
      */
     function _approve(address tokenOwner, address spender, uint256 amount) internal {
-        require(tokenOwner != address(0), "E84");
-        require(spender != address(0), "E85");
+        if (tokenOwner == address(0)) revert APRV_FROM_ZERO();
+        if (spender == address(0)) revert APRV_TO_ZERO();
         _allowances[tokenOwner][spender] = amount;
         emit Approval(tokenOwner, spender, amount);
     }
 
     /**
-     * @dev Public function to increase the allowance for a spender
-     * This is a safer alternative to approve that mitigates the race condition
-     * @param spender The address that will be allowed to spend the tokens
-     * @param addedValue The number of tokens to increase the allowance by (in wei)
-    */
-    function increaseAllowance(address spender, uint256 addedValue) public returns (bool) {
-    uint256 currentAllowance = allowance(msg.sender, spender);
-    require(currentAllowance + addedValue >= currentAllowance, "E86");
-    _approve(msg.sender, spender, currentAllowance + addedValue);
-    return true;
-}
-
-    /**
-     * @dev Public function to decrease the allowance for a spender
-     * This is a safer alternative to approve that mitigates the race condition
-     * @param spender The address that will be allowed to spend the tokens
-     * @param subtractedValue The number of tokens to decrease the allowance by (in wei)
+     * @notice Bump up the allowance you gave to someone.
+     * @dev Much safer than calling `approve` again.
+     * @param spender The person you're trusting.
+     * @param addedValue How many extra tokens they can spend.
+     * @return True if it worked.
      */
-    function decreaseAllowance(address spender, uint256 subtractedValue) public returns (bool) {
-    uint256 currentAllowance = allowance(msg.sender, spender);
-    require(currentAllowance >= subtractedValue, "E87");
-    _approve(msg.sender, spender, currentAllowance - subtractedValue);
-    return true;
-}
+    function increaseAllowance(address spender, uint256 addedValue) public returns (bool) {
+        uint256 currentAllowance = allowance(msg.sender, spender);
+        if (currentAllowance + addedValue < currentAllowance) revert APRV_OVERFLOW();
+        _approve(msg.sender, spender, currentAllowance + addedValue);
+        return true;
+    }
     
     /**
-     * @dev Internal function to reduce allowance when tokens are spent
-     * Updates allowance after a successful transferFrom operation
-     * If allowance is set to max uint256, it won't be reduced (infinite approval)
-     * @param account The address that owns the tokens
-     * @param spender The address that is spending the tokens
-     * @param amount The number of tokens being spent (in wei)
-     * 
-     * Requirements:
-     * - Current allowance must be greater than or equal to `amount` (unless infinite)
-     * 
-     * NOTE: Does not update the allowance if it is set to type(uint256).max
+     * @dev Speed limit check for a wallet. We use a "circular buffer" 
+     *      to keep the gas costs small and consistent.
+     * @param account The address we're checking.
+     */
+    function _checkVelocityLimit(address account) private {
+        uint256 currentTime = block.timestamp;
+        uint256 window = velocityTimeWindow;
+        uint256 maxTx = maxTxPerWindow;
+        
+        // Let's count how many trades happened in the window
+        uint256 txCount = 0;
+        for (uint256 i = 0; i < MAX_VELOCITY_BUFFER; i++) {
+            uint256 txTime = userVelocityBuffer[account][i];
+            if (txTime != 0 && currentTime - txTime <= window) {
+                txCount++;
+            }
+        }
+        
+        // Reached the limit? Block the trade.
+        if (txCount >= maxTx) {
+            emit VelocityLimitTriggered(account, txCount, window);
+            revert MEV_VELOCITY();
+        }
+        
+        // Save the timestamp and move to the next slot in the buffer
+        uint256 index = userVelocityIndex[account];
+        userVelocityBuffer[account][index] = currentTime;
+        userVelocityIndex[account] = (index + 1) % MAX_VELOCITY_BUFFER;
+    }
+
+    /**
+     * @notice Lower the allowance you gave to someone.
+     * @param spender The person you're trusting less.
+     * @param subtractedValue How many tokens to take away from their allowance.
+     * @return True if it worked.
+     */
+    function decreaseAllowance(address spender, uint256 subtractedValue) public returns (bool) {
+        uint256 currentAllowance = allowance(msg.sender, spender);
+        if (currentAllowance < subtractedValue) revert APRV_UNDERFLOW();
+        _approve(msg.sender, spender, currentAllowance - subtractedValue);
+        return true;
+    }
+    
+    /**
+     * @dev Deduct from the allowance during a `transferFrom`.
+     *      If someone has "infinite" allowance (max uint256), we don't bother deducting.
+     * @param account Owner of the tokens.
+     * @param spender Person spending them.
+     * @param amount Tokens being spent.
      */
     function _spendAllowance(address account, address spender, uint256 amount) internal {
         uint256 currentAllowance = allowance(account, spender);
         if (currentAllowance != type(uint256).max) {
-            require(currentAllowance >= amount, "E88");
+            if (currentAllowance < amount) revert APRV_INSUFFICIENT();
             unchecked {
                 _approve(account, spender, currentAllowance - amount);
             }
         }
     }
     
+    /// @notice Record that a trade happened so we can enforce cooldowns.
+    function _updateTradingState(address account) internal {
+        lastBlockNumber[account] = block.number;
+        lastTradeTime[account] = block.timestamp;
+    }
+
     /**
-     * @dev Internal transfer function with comprehensive tax logic and security checks
-     * This is the main transfer function that handles all business logic including:
-     * - Pause check: Prevents transfers when contract is paused
-     * - Transaction limits: Enforces max transaction and wallet limits
-     * - Anti-dump protection: Prevents large sells that could crash price
-     * - Anti-bot protection: Blocks bot trading during launch period
-     * - Tax calculation: Applies buy/sell/transfer taxes based on transaction type
-     * - Price impact check: Prevents trades that would move price too much
-     * - Auto-liquidity: Automatically adds liquidity when threshold reached
-     * 
-     * @param from The address sending tokens
-     * @param to The address receiving tokens
-     * @param amount The total number of tokens to transfer (tax will be deducted)
-     * 
-     * Tax Logic:
-     * - Owner and contract transfers: No tax
-     * - Tax-exempt addresses: No tax
-     * - Buy from DEX: buyTaxPercent applied
-     * - Sell to DEX: sellTaxPercent applied
-     * - Wallet to wallet: transferTaxPercent applied
-     * 
-     * The tax amount is sent to the treasury address, remainder goes to recipient
+     * @dev This is the main engine room of the NTE token. It handles taxes, 
+     *      security, and all the "anti-cheat" protections in one place.
+     *      We check things in this order for safety:
+     *      1. Is the whole contract paused?
+     *      2. Are we still in the "Anti-Bot" launch minutes?
+     *      3. Is the sender or receiver blacklisted?
+     *      4. Is the wallet trading too fast (Velocity/MEV)?
+     *      5. Finally, calculate taxes and move the tokens.
+     * @param from The person sending.
+     * @param to The person (or DEX pool) receiving.
+     * @param amount The total tokens being moved.
      */
     function _transferWithTax(address from, address to, uint256 amount) internal nonReentrant {
-        // Pause check - if pauseIncludesOwner is true, owner is also paused
+        // Basic checks first
+        if (amount == 0) revert TXN_AMOUNT_ZERO();
+        if (from == address(0)) revert ADDR_FROM_ZERO();
+        if (to == address(0)) revert ADDR_TO_ZERO();
+        
+        // If we're paused, everything stops (unless you're the owner)
         if (_paused) {
             if (pauseIncludesOwner) {
-                revert("E89");
+                revert SYS_DISABLED();
             } else {
-                require(from == _owner || to == _owner, "E89");
-            }
-        }
-    require(amount > 0, "E39");
-    require(from != address(0), "E79");
-    require(to != address(0), "E80");
-        
-        // MEV Protection - prevent sandwich attacks and front-running
-        if (mevProtectionEnabled && !mevProtectionExempt[from] && !mevProtectionExempt[to]) {
-            // Block number protection - prevent multiple transactions in same block
-            if (lastBlockNumber[from] != 0 && (block.number - lastBlockNumber[from]) <= maxBlocksForMevProtection) {
-                emit MevAttackPrevented(from, block.number, "M03");
-                revert("E90");
-            }
-            
-            // Time-based protection
-            if (lastTradeTime[from] != 0 && (block.timestamp - lastTradeTime[from]) < minTimeBetweenTxs) {
-                emit MevAttackPrevented(from, block.number, "M04");
-                revert("E91");
-            }
-            
-            // Update tracking for sender (both block and time)
-            lastBlockNumber[from] = block.number;
-            lastTradeTime[from] = block.timestamp;
-            
-            // For sells to DEX, also check recipient (prevent coordinated attacks)
-            if (isPancakePair[to] && lastBlockNumber[to] != 0 && 
-                (block.number - lastBlockNumber[to]) <= maxBlocksForMevProtection) {
-                emit MevAttackPrevented(to, block.number, "M05");
-                revert("E92");
-            }
-            
-            if (isPancakePair[to]) {
-                lastBlockNumber[to] = block.number;
-                lastTradeTime[to] = block.timestamp;
+                if (from != _owner && to != _owner) revert SYS_DISABLED();
             }
         }
         
-        // Check transaction limits
-        if (!taxExempt[from] && !taxExempt[to]) {
-            
-            // Calculate actual amount recipient will receive for wallet limit check
-            if (to != address(this) && !isPancakePair[to]) {
-                uint256 tax = _calculateTax(from, to, amount);
-                uint256 receivedAmount = amount - tax;
-                
-                // Safe addition check
-                uint256 newBalance = _balances[to] + receivedAmount;
-                require(newBalance >= _balances[to], "E94");
-            }
-        }
-        
-        // Check wallet cooldown globally (no exemptions)
-        if (walletCooldownEnabled) {
-            // Check sender cooldown
-            require(block.timestamp >= lastTradeTime[from] + globalCooldownSeconds, "E96");
-            
-            // Check recipient cooldown (prevent bypass through intermediary wallets)
-            if (!isPancakePair[to] && to != address(this)) {
-                require(block.timestamp >= lastTradeTime[to] + globalCooldownSeconds, "E97");
-                // Only update recipient time if not already updated by MEV protection
-                if (!mevProtectionEnabled || mevProtectionExempt[to]) {
-                    lastTradeTime[to] = block.timestamp;
-                }
-            }
-            
-            // Only update sender time if not already updated by MEV protection
-            if (!mevProtectionEnabled || mevProtectionExempt[from]) {
-                lastTradeTime[from] = block.timestamp;
-            }
-        } else {
-            // If wallet cooldown is disabled but MEV protection wasn't enabled,
-            // ensure lastTradeTime is still updated for potential future MEV checks
-            if (!mevProtectionEnabled) {
-                lastTradeTime[from] = block.timestamp;
-                if (!isPancakePair[to] && to != address(this)) {
-                    lastTradeTime[to] = block.timestamp;
-                }
-            }
-        }
-        
-        // Check price impact limits for sells to DEX
-        if (priceImpactLimitEnabled && isPancakePair[to] && !priceImpactExempt[from] && pancakeRouter != address(0)) {
-            uint256 priceImpact = _calculatePriceImpact(amount);
-            require(priceImpact <= maxPriceImpactPercent, "E98");
-        }
-        
-        // Anti-dump check for sells to DEX
-        if (antiDumpEnabled && isPancakePair[to] && !taxExempt[from]) {
-            uint256 maxSellAmount = (_totalSupply * maxSellPercentage) / 100;
-            require(amount <= maxSellAmount, "E99");
-            
-            // This prevents conflicts with wallet cooldown system
-            require(block.timestamp >= lastTradeTime[from] + sellCooldown, "E100");
-            // Note: lastTradeTime[from] is updated later in MEV/cooldown checks
-        }
-        
-        // Anti-bot check during launch period
+        // Launch day shields - very strict for the first hour or so
         if (antiBotEnabled && block.timestamp < launchTime + antiBotDuration) {
-            require(from == _owner || to == _owner || taxExempt[from] || taxExempt[to], "E101");
+            if (!(from == _owner || to == _owner || taxExempt[from] || taxExempt[to])) {
+                revert SEC_BOT_ACTIVE();
+            }
         }
         
-        // Check if we should trigger auto-liquidity
-        bool shouldSwapAndLiquify = autoLiquidityEnabled &&
-            !inSwapAndLiquify &&
-            from != pancakePair &&
-            accumulatedLiquidityTokens >= liquidityThreshold &&
-            pancakeRouter != address(0) &&
-            !autoLiquidityPaused &&
-            _consecutiveSlippageFailures < MAX_CONSECUTIVE_FAILURES;
+        if (isBlacklistedActive(from)) revert BL_SENDER();
+        if (isBlacklistedActive(to)) revert BL_RECIPIENT();
         
-        // Apply tax or exempt
+        if (whitelistEnabled) {
+            if (!(from == _owner || to == _owner || 
+                isWhitelistedActive(from) || isWhitelistedActive(to) ||
+                from == address(this) || to == address(this))) {
+                revert WL_REQUIRED();
+            }
+        }
+        
+        if (velocityLimitEnabled && !velocityLimitExempt[from] && from != _owner && from != address(this)) {
+            _checkVelocityLimit(from);
+        }
+        
+        // Capture the old timestamps BEFORE we update them for the current trade
+        uint256 cachedFromLastTrade = lastTradeTime[from];
+        uint256 cachedToLastTrade = lastTradeTime[to];
+        
+        // MEV Protection - spotting bots and fresh wallets trying to dump
+        if (mevProtectionEnabled && !mevProtectionExempt[from] && !mevProtectionExempt[to]) {
+            bool isSellToPair = isPancakePair[to];
+            
+            // Check if it's a contract (robots usually live in contracts)
+            bool isFromContract = _isContract(from);
+            
+            // Contracts can't sell directly to the pool (stops flash loan attacks)
+            if (isSellToPair && isFromContract && from != address(this)) {
+                emit MevAttackPrevented(from, block.number, "CONTRACT_SELL");
+                revert MEV_VELOCITY();
+            }
+            
+            // If it's a sell, we check if the wallet is brand new
+            if (isSellToPair) {
+                if (lastBlockNumber[from] == 0) {
+                    emit MevAttackPrevented(from, block.number, "FRESH_WALLET_SELL");
+                    revert MEV_VELOCITY();
+                }
+                // Even if not brand new, you can't sell if you just bought 60 seconds ago
+                if (lastTradeTime[from] != 0 && block.timestamp - lastTradeTime[from] < 60) {
+                    emit MevAttackPrevented(from, block.number, "NEW_WALLET_RAPID_SELL");
+                    revert MEV_VELOCITY();
+                }
+            }
+            
+            // General speed checks for everyone else
+            if (lastBlockNumber[from] != 0) {
+                if (block.number > lastBlockNumber[from]) {
+                    if ((block.number - lastBlockNumber[from]) <= maxBlocksForMevProtection) {
+                        emit MevAttackPrevented(from, block.number, "MEV_BLOCK");
+                        revert MEV_VELOCITY();
+                    }
+                }
+                
+                if ((block.timestamp - lastTradeTime[from]) < minTimeBetweenTxs) {
+                    emit MevAttackPrevented(from, block.number, "MEV_TIME");
+                    revert MEV_TOO_FAST();
+                }
+            }
+        }
+        
+        bool isToPair = isPancakePair[to];
+        
+        // Cooldown checks - did you wait long enough since your last move?
+        if (walletCooldownEnabled) {
+            if (cachedFromLastTrade != 0 && block.timestamp < cachedFromLastTrade + globalCooldownSeconds) revert CD_SENDER();
+            
+            if (!isToPair && to != address(this)) {
+                if (cachedToLastTrade != 0 && block.timestamp < cachedToLastTrade + globalCooldownSeconds) revert CD_RECIPIENT();
+            }
+        }
+        
+        if (priceImpactLimitEnabled && isToPair && !priceImpactExempt[from] && pancakeRouter != address(0)) {
+            uint256 priceImpact = _calculatePriceImpact(amount);
+            if (priceImpact > maxPriceImpactPercent) revert PRICE_TOO_HIGH();
+        }
+        
+        // Anti-dump - preventing massive sells that crash the price
+        if (antiDumpEnabled && isToPair && !taxExempt[from]) {
+            uint256 maxSellAmount = (_totalSupply * maxSellPercentage) / 100;
+            if (amount > maxSellAmount) revert DUMP_EXCEEDS();
+            
+            if (cachedFromLastTrade != 0 && block.timestamp < cachedFromLastTrade + sellCooldown) revert CD_SELL();
+        }
+        
+        // Now that we're sure the trade is legit, update the state
+        _updateTradingState(from);
+        if (!isToPair && to != address(this)) {
+            _updateTradingState(to);
+        }
+        
+        // Final step: Move the tokens (and take tax if applicable)
         if (
             from == _owner ||
             to == _owner ||
             from == address(this) ||
             to == address(this) ||
             taxExempt[from] ||
-            taxExempt[to] ||
-            inSwapAndLiquify
+            taxExempt[to]
         ) {
-            // No tax - direct transfer
             _transfer(from, to, amount);
         } else {
             uint256 tax = _calculateTax(from, to, amount);
             
-            if (tax > 0 && treasury != address(0)) {
+            if (tax > 0) {
+                if (treasury == address(0)) revert TAX_TREASURY_ZERO();
+                
                 uint256 afterTax = amount - tax;
                 
-                // Split tax between treasury and liquidity if auto-liquidity enabled
-                if (autoLiquidityEnabled && liquidityFeePercent > 0) {
-                    uint256 liquidityPortion = (tax * liquidityFeePercent) / 100;
-                    uint256 treasuryPortion = tax - liquidityPortion;
-                    
-                    // Transfer recipient amount (after tax deduction)
-                    _transfer(from, to, afterTax);
-                    
-                    // Transfer liquidity portion to contract (if any)
-                    if (liquidityPortion > 0) {
-                        // When auto-liquidity is paused, send liquidity portion to treasury instead
-                        // This prevents indefinite accumulation while circuit breaker is active
-                        if (autoLiquidityPaused) {
-                            _transfer(from, treasury, liquidityPortion);
-                        } else {
-                            _transfer(from, address(this), liquidityPortion);
-                            // Safe addition
-                            uint256 newAccumulated = accumulatedLiquidityTokens + liquidityPortion;
-                            require(newAccumulated >= accumulatedLiquidityTokens, "E102");
-                            accumulatedLiquidityTokens = newAccumulated;
-                        }
-                    }
-                    
-                    // Transfer treasury portion (if any)
-                    if (treasuryPortion > 0) {
-                        _transfer(from, treasury, treasuryPortion);
-                    }
-
-                    // Verify total transferred equals original amount (always true by definition)
-                    assert(afterTax + liquidityPortion + treasuryPortion == amount);
-                } else {
-                    // No auto-liquidity: direct transfer with tax to treasury
-                    _transfer(from, to, afterTax);
-                    _transfer(from, treasury, tax);
-                    
-                    // Verify total transferred equals original amount (always true by definition)
-                    assert(afterTax + tax == amount);
-                }
+                _transfer(from, to, afterTax);
+                _transfer(from, treasury, tax);
+                
+                if (afterTax + tax != amount) revert TXN_TAX_MISMATCH();
             } else {
-                // No tax applicable
                 _transfer(from, to, amount);
             }
-        }
-
-        // Trigger auto-liquidity after all transfers complete (Checks-Effects-Interactions)
-        if (shouldSwapAndLiquify) {
-            _swapAndLiquify(accumulatedLiquidityTokens);
         }
     }
 
     /**
-     * @dev Calculate tax for a transfer
+     * @dev Deciding which tax rate applies to this specific trade.
+     *      We check if it's a Buy, a Sell, or just a friend-to-friend (P2P) move.
+     * @param from Sender address.
+     * @param to Recipient address.
+     * @param amount Base amount.
+     * @return The amount of tokens to take as tax.
      */
     function _calculateTax(address from, address to, uint256 amount) private view returns (uint256) {
         uint256 taxBps = 0;
         
-        // Use basis points system for precise tax calculation
         if (isPancakePair[from] && !isPancakePair[to]) {
+            // Buy: from DEX to user
             taxBps = buyTaxBps;
         } else if (!isPancakePair[from] && isPancakePair[to]) {
+            // Sell: from user to DEX
             taxBps = sellTaxBps;
-        } else if (!isPancakePair[from] && !isPancakePair[to]) {
+        } else if (isPancakePair[from] && isPancakePair[to]) {
+            // Pool-to-pool move (usually arbitrage)
+            taxBps = sellTaxBps;
+        } else {
+            // Just a regular P2P transfer
             taxBps = transferTaxBps;
         }
         
         if (taxBps == 0) return 0;
         
-        // Safe multiplication and division with basis points (1 bp = 0.01%)
-        // tax = (amount * taxBps) / 10000
-        // Check for overflow BEFORE calculation to prevent wrap-around
-        if (amount > type(uint256).max / taxBps) return 0; // Overflow protection
+        // Check for math overflow before we calculate
+        if (amount > type(uint256).max / taxBps) revert TXN_OVERFLOW();
         
-        uint256 tax = (amount * taxBps) / BASIS_POINTS;
-        
-        // Note: tax <= amount is guaranteed by the overflow check above
-        // since taxBps <= 2500 (max 25%) and BASIS_POINTS = 10000
-        // If amount * taxBps doesn't overflow, then tax = (amount * taxBps) / 10000 <= amount
-        
-        return tax;
+        return (amount * taxBps) / BASIS_POINTS;
     }
     
-    function _swapAndLiquify(uint256 tokensToLiquify) private lockTheSwap {
-        require(tokensToLiquify > 0, "E53");
-        require(pancakeRouter != address(0), "E52");
-        require(_validatedRouters[pancakeRouter], "E104");
-        
-        // Validate slippage is within safe bounds
-        uint256 effectiveSlippage = calculateDynamicSlippage(tokensToLiquify / 2);
-    require(effectiveSlippage <= maxAllowedSlippage, "E105");
-        
-        // Split tokens: half for swap, half for liquidity
-        uint256 half = tokensToLiquify / 2;
-        uint256 otherHalf = tokensToLiquify - half;
-
-        // Capture initial BNB balance
-        uint256 initialBalance = address(this).balance;
-
-        // Perform swap with retry mechanism
-        bool swapSuccess = false;
-        uint256 attempts = 0;
-        uint256 maxAttempts = 3;
-        uint256 minGasPerAttempt = 300000; // Increased gas requirement
-
-        while (attempts < maxAttempts && gasleft() > minGasPerAttempt) {
-            address[] memory path = new address[](2);
-            path[0] = address(this);
-            path[1] = IPancakeRouter(pancakeRouter).WETH();
-            
-            // Approve exact amount for swap
-            _approve(address(this), pancakeRouter, half);
-            
-            try IPancakeRouter(pancakeRouter).getAmountsOut(half, path) returns (uint[] memory amounts) {
-                if (amounts.length < 2 || amounts[1] == 0) {
-                    // Reset approval on failure to prevent leftover approvals
-                    _approve(address(this), pancakeRouter, 0);
-                    emit SwapFailed(half, "M06");
-                    break;
-                }
-                
-                uint256 minBnbAmount = (amounts[1] * (BASIS_POINTS - effectiveSlippage)) / BASIS_POINTS;
-
-                try IPancakeRouter(pancakeRouter).swapExactTokensForETHSupportingFeeOnTransferTokens(
-                    half,
-                    minBnbAmount,
-                    path,
-                    address(this),
-                    block.timestamp + 300
-                ) {
-                    // Reset approval after successful swap to prevent residual approvals
-                    _approve(address(this), pancakeRouter, 0);
-                    emit SwapAttempted(half, effectiveSlippage, true);
-                    swapSuccess = true;
-                    _consecutiveSlippageFailures = 0; // Reset on success
-                    break;
-                } catch Error(string memory reason) {
-                    attempts++;
-                    if (attempts >= maxAttempts) {
-                        // Reset approval on final failure
-                        _approve(address(this), pancakeRouter, 0);
-                        emit SwapFailed(half, reason);
-                        _consecutiveSlippageFailures++;
-                    } else {
-                        // Conservative retry slippage increase
-                        uint256 retrySlippage = effectiveSlippage + 50; // +0.5%
-                        effectiveSlippage = retrySlippage > maxAllowedSlippage ? maxAllowedSlippage : retrySlippage;
-                    }
-                } catch {
-                    attempts++;
-                    if (attempts >= maxAttempts) {
-                        // Reset approval on final failure
-                        _approve(address(this), pancakeRouter, 0);
-                        emit SwapFailed(half, "M07");
-                        _consecutiveSlippageFailures++;
-                    }
-                }
-            } catch {
-                // Reset approval on failure to prevent leftover approvals
-                _approve(address(this), pancakeRouter, 0);
-                emit SwapFailed(half, "M08");
-                _consecutiveSlippageFailures++;
-                break;
-            }
-        }
-
-        // Circuit breaker - pause auto-liquidity after consecutive failures
-        if (_consecutiveSlippageFailures >= MAX_CONSECUTIVE_FAILURES) {
-            autoLiquidityPaused = true;
-            // Reset accumulated tokens to prevent indefinite growth while paused
-            // This prevents contract from becoming unusable due to excessive accumulation
-            accumulatedLiquidityTokens = 0;
-            emit CircuitBreakerTriggered("M09");
-        }
-
-        uint256 bnbReceived = address(this).balance - initialBalance;
-
-        if (swapSuccess && bnbReceived > 0) {
-            // Approve exact amount for liquidity addition
-            _approve(address(this), pancakeRouter, otherHalf);
-            
-            uint256 minTokenAmount = (otherHalf * (BASIS_POINTS - effectiveSlippage)) / BASIS_POINTS;
-            uint256 minBnbAmount = (bnbReceived * (BASIS_POINTS - effectiveSlippage)) / BASIS_POINTS;
-
-            try IPancakeRouter(pancakeRouter).addLiquidityETH{value: bnbReceived}(
-                address(this),
-                otherHalf,
-                minTokenAmount,
-                minBnbAmount,
-                _owner,
-                block.timestamp + 300
-            ) returns (uint amountToken, uint amountETH, uint liquidity) {
-                // Reset approval after successful liquidity addition
-                _approve(address(this), pancakeRouter, 0);
-                accumulatedLiquidityTokens = 0;
-                lastLiquidityAddTime = block.timestamp;
-                
-                // Safe addition
-                uint256 newTotal = totalLiquidityAdded + tokensToLiquify;
-                require(newTotal >= totalLiquidityAdded, "E106");
-                totalLiquidityAdded = newTotal;
-                
-                emit LiquidityAdded(amountToken, amountETH, liquidity);
-            } catch Error(string memory reason) {
-                // Reset approval on failure to prevent leftover approvals
-                _approve(address(this), pancakeRouter, 0);
-                emit LiquidityOperationFailed("M10", reason);
-                _consecutiveSlippageFailures++;
-            } catch {
-                // Reset approval on failure to prevent leftover approvals
-                _approve(address(this), pancakeRouter, 0);
-                emit LiquidityOperationFailed("M10", "M11");
-                _consecutiveSlippageFailures++;
-            }
-        } else {
-            // Reset on swap failure to prevent stuck state
-            accumulatedLiquidityTokens = 0;
-            emit LiquidityOperationFailed("M12", "M12");
-        }
-    }
+    /// @notice The fixed fee PancakeSwap takes (0.25%)
+    uint256 private constant DEX_FEE_BPS = 25;
     
-    function calculateDynamicSlippage(uint256 amount) internal view returns (uint256) {
-        if (amount == 0) return maxAllowedSlippage;
-        
-        uint256 calculatedSlippage;
-        if (amount >= DYNAMIC_SLIPPAGE_THRESHOLD) {
-            calculatedSlippage = HIGH_VOLUME_SLIPPAGE;  // 200 (2%)
-        } else {
-            calculatedSlippage = LOW_VOLUME_SLIPPAGE;   // 500 (5%)
-        }
-        
-        // Always respect maximum allowed slippage
-        return calculatedSlippage > maxAllowedSlippage ? maxAllowedSlippage : calculatedSlippage;
-    }
-    
+    /**
+     * @dev Predicting how much the price will move if you sell this amount.
+     *      We use the standard AMM formula: (x + dx)(y - dy) = xy
+     * @param amount Tokens being sold.
+     * @return impact Price impact in basis points (100 = 1%).
+     */
     function _calculatePriceImpact(uint256 amount) internal view returns (uint256 impact) {
         if (pancakeRouter == address(0) || pancakePair == address(0) || amount == 0) return 0;
 
-        address[] memory path = new address[](2);
-        path[0] = address(this);
-        path[1] = IPancakeRouter(pancakeRouter).WETH();
-
-        // Use smaller reference amount for spot price (prevent overflow)
-        uint256 referenceAmount = 1 * 10**_decimals;
+        (uint256 reserve0, uint256 reserve1, ) = IPancakePair(pancakePair).getReserves();
         
-        // Critical safety check: Ensure referenceAmount is never zero
-        // This protects against edge cases with decimals configuration
-        if (referenceAmount == 0) return maxPriceImpactPercent;
-        
-        // Additional safety check for extremely large amounts
-        if (amount > _totalSupply / 10) return maxPriceImpactPercent; // Cap at 10% of supply
-        
-        try IPancakeRouter(pancakeRouter).getAmountsOut(referenceAmount, path) returns (uint[] memory refAmounts) {
-            if (refAmounts.length < 2 || refAmounts[1] == 0) return maxPriceImpactPercent;
-            
-            try IPancakeRouter(pancakeRouter).getAmountsOut(amount, path) returns (uint[] memory tradeAmounts) {
-                if (tradeAmounts.length < 2 || tradeAmounts[1] == 0) return maxPriceImpactPercent;
-                
-                // Calculate price impact with enhanced overflow protection
-                
-                // Check if multiplication will overflow BEFORE performing it
-                if (refAmounts[1] > type(uint256).max / amount) return maxPriceImpactPercent;
-                
-                uint256 spotPriceNumerator = refAmounts[1] * amount;
-                uint256 spotPriceDenominator = referenceAmount;
-                uint256 actualPrice = tradeAmounts[1];
-                
-                // Verify multiplication was safe
-                if (spotPriceNumerator / amount != refAmounts[1]) return maxPriceImpactPercent;
-                
-                // Safe division check
-                if (spotPriceDenominator == 0) return maxPriceImpactPercent;
-                uint256 expectedOutput = spotPriceNumerator / spotPriceDenominator;
-                
-                // Check for underflow and handle edge cases
-                if (actualPrice >= expectedOutput) return 0; // No negative impact or rounding error
-                
-                uint256 priceDiff = expectedOutput - actualPrice;
-                
-                // Enhanced overflow protection for basis points calculation
-                if (expectedOutput == 0) return maxPriceImpactPercent;
-                if (priceDiff > expectedOutput) return maxPriceImpactPercent; // Sanity check
-                if (priceDiff > type(uint256).max / BASIS_POINTS) return maxPriceImpactPercent;
-                
-                impact = (priceDiff * BASIS_POINTS) / expectedOutput;
-                
-                // Final bounds checking
-                if (impact > BASIS_POINTS) impact = BASIS_POINTS; // Cap at 100%
-                if (impact > maxPriceImpactPercent) impact = maxPriceImpactPercent;
-                
-            } catch {
-                return maxPriceImpactPercent;
-            }
-        } catch {
-            return maxPriceImpactPercent;
+        uint256 reserveToken;
+        uint256 reserveOther;
+        if (IPancakePair(pancakePair).token0() == address(this)) {
+            reserveToken = reserve0;
+            reserveOther = reserve1;
+        } else {
+            reserveToken = reserve1;
+            reserveOther = reserve0;
         }
+
+        if (reserveToken == 0 || reserveOther == 0) return BASIS_POINTS;
+
+        // Factor in the sell tax first
+        uint256 taxAmount = (amount * sellTaxBps) / BASIS_POINTS;
+        uint256 amountAfterTax = amount - taxAmount;
+        
+        // Then factor in the DEX fee
+        uint256 amountAfterFee = (amountAfterTax * (BASIS_POINTS - DEX_FEE_BPS)) / BASIS_POINTS;
+        
+        // Math magic to find the price movement
+        uint256 outputWithoutImpact = (reserveOther * amountAfterFee) / reserveToken;
+        uint256 outputWithImpact = (reserveOther * amountAfterFee) / (reserveToken + amountAfterFee);
+        
+        if (outputWithoutImpact == 0) return BASIS_POINTS;
+        
+        // Find the difference and turn it into a percentage
+        uint256 impactAmount = outputWithoutImpact - outputWithImpact;
+        impact = (impactAmount * BASIS_POINTS) / outputWithoutImpact;
+        
+        if (impact > BASIS_POINTS) impact = BASIS_POINTS;
         
         return impact;
     }
@@ -1746,54 +2073,53 @@ contract NTE is IERC20 {
 
     
     /**
-     * @notice Get auto-liquidity configuration and statistics
-     * @return enabled Whether auto-liquidity is active
-     * @return feePercent Percentage of tax going to liquidity
-     * @return threshold Minimum tokens needed to trigger auto-liquidity
-     * @return accumulated Current tokens accumulated for liquidity
-     * @return totalAdded Total tokens converted to liquidity since deployment
-     * @return lastAddTime Last time liquidity was added (Unix timestamp)
-     * @return slippageBps Current slippage tolerance in basis points
+     * @dev Crypto helper to find out who signed a message.
+     * @param _ethSignedMessageHash The message that was signed.
+     * @param _signature The raw 65-byte signature.
+     * @return The address that signed it (or zero address if invalid).
      */
-    function getAutoLiquidityInfo() public view returns (
-        bool enabled,
-        uint256 feePercent,
-        uint256 threshold,
-        uint256 accumulated,
-        uint256 totalAdded,
-        uint256 lastAddTime,
-        uint256 slippageBps
-    ) {
-        return (
-            autoLiquidityEnabled,
-            liquidityFeePercent,
-            liquidityThreshold,
-            accumulatedLiquidityTokens,
-            totalLiquidityAdded,
-            lastLiquidityAddTime,
-            autoLiquiditySlippageBps
-        );
+    function _recoverSigner(bytes32 _ethSignedMessageHash, bytes memory _signature) internal pure returns (address) {
+        if (_signature.length != 65) return address(0);
+
+        bytes32 r;
+        bytes32 s;
+        uint8 v;
+
+        // Assembly magic to pull r, s, and v out of the signature bytes
+        assembly {
+            r := mload(add(_signature, 32))
+            s := mload(add(_signature, 64))
+            v := byte(0, mload(add(_signature, 96)))
+        }
+
+        if (v < 27) v += 27;
+        if (v != 27 && v != 28) return address(0);
+
+        // Security check for the "s" value
+        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
+            return address(0);
+        }
+
+        address recovered = ecrecover(_ethSignedMessageHash, v, r, s);
+        if (recovered == address(0)) return address(0);
+        
+        return recovered;
     }
-    
-   
 
     /**
-     * @dev Internal function to check if an address is a contract
-     * @param account The address to check
-     * @return True if the address is a contract, false if it's an EOA
+     * @dev Checking if an address is a contract or just a regular person's wallet.
+     * @param account The address to check.
+     * @return True if it's a contract.
      */
     function _isContract(address account) internal view returns (bool) {
-        uint256 size;
-        assembly {
-            size := extcodesize(account)
-        }
-        return size > 0;
+        return account.code.length > 0;
     }
 
-    // Required to receive BNB from PancakeSwap
+    /**
+     * @dev Standard function to let the contract receive BNB directly.
+     */
     receive() external payable {
-        // Emit event to track source for monitoring
+        // Just log it so we know where it came from
         emit BNBReceived(msg.sender, msg.value);
-    
     }
 }
