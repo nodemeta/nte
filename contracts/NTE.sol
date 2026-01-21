@@ -75,13 +75,14 @@ pragma solidity ^0.8.28;
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ SHIELD PROTECTION [MEV_*]                                               │
  * └─────────────────────────────────────────────────────────────────────────┘
- * MEV_BLOCKS_HIGH  Block limit set too high      MEV_TOO_FAST       Wait a bit between trades
+ * MEV_BLOCKS_HIGH  Block limit set too high      MEV_TIME_HIGH      Time window set too high
+ * MEV_VELOCITY     Too many trades in window     MEV_TOO_FAST       Wait a bit between trades
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ TIMERS & LIMITS [CD_*, LIMIT_*]                                         │
  * └─────────────────────────────────────────────────────────────────────────┘
  * CD_TOO_HIGH      Cooldown is over 1 day        CD_SELL            Sell cooldown active
- * CD_SENDER        Sender is on cooldown
+ * CD_SENDER        Sender is on cooldown         CD_RECIPIENT       Recipient is on cooldown
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ STABILITY & ANTI-DUMP [DUMP_*, PRICE_*]                                 │
@@ -91,7 +92,7 @@ pragma solidity ^0.8.28;
  * PRICE_INVALID    Impact must be 0.1% to 100%
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ CATEGORIES [CAT_*]                                                      │
+ * TXN_REPLAY       This transaction was used     TXN_TAX_MISMATCH   Internal tax math mismatch
  * └─────────────────────────────────────────────────────────────────────────┘
  * CAT_INVALID      This category doesn't exist   CAT_DISABLED       Category is turned off
  *
@@ -107,7 +108,7 @@ pragma solidity ^0.8.28;
  * │ GENERAL CHECKS [ADDR_*]                                                 │
  * └─────────────────────────────────────────────────────────────────────────┘
  * ADDR_INVALID     Address is invalid or zero    ADDR_ZERO          Zero address not allowed
- * ADDR_ZERO_ADDR   Zero address in signature
+ *
  *
  * ═══════════════════════════════════════════════════════════════════════════
  * EVENT MESSAGE CODES
@@ -246,6 +247,13 @@ contract NTE is IERC20 {
     uint256 public sellTaxBps;
     /// @notice Tax taken for standard wallet-to-wallet transfers
     uint256 public transferTaxBps;
+    
+    /// @notice Whether a portion of tax is routed to a liquidity manager
+    bool public autoLiquidityEnabled;
+    /// @notice Percentage of collected tax sent to the liquidity manager (in basis points)
+    uint256 public autoLiquidityBps;
+    /// @notice Contract that receives liquidity tax and manages swap+LP logic
+    address public liquidityCollector;
     
     /// @notice The PancakeSwap router we talk to
     address public pancakeRouter;
@@ -443,10 +451,6 @@ contract NTE is IERC20 {
     event WhitelistModeUpdated(bool enabled);
     /// @notice Emitted when token name and symbol change
     event NameSymbolUpdated(string newName, string newSymbol);
-    /// @notice Emitted when token metadata (branding) changes
-    event MetadataUpdated(string tokenURI);
-    /// @notice Emitted when anti-bot configuration changes
-    event AntiBotConfigUpdated(bool enabled, uint256 duration);
     /// @notice Emitted when anti-dump configuration changes
     event AntiDumpConfigUpdated(bool enabled, uint256 maxPercentage, uint256 cooldown);
     /// @notice Emitted when price impact limit settings change
@@ -463,6 +467,12 @@ contract NTE is IERC20 {
     
     /// @notice Emitted when tax rates are updated
     event TaxRatesUpdated(uint256 newBuyTaxBps, uint256 newSellTaxBps, uint256 newTransferTaxBps);
+    /// @notice Emitted when tax is routed to the treasury
+    event TaxRouted(address indexed from, address indexed treasury, uint256 amount);
+    /// @notice Emitted when tax is routed to the liquidity manager
+    event LiquidityRouted(address indexed from, address indexed liquidityCollector, uint256 amount);
+    /// @notice Emitted when auto-liquidity configuration is updated
+    event AutoLiquidityConfigUpdated(bool enabled, uint256 percentageBps, address liquidityCollector);
     
     /// @notice Emitted when protection settings change
     event MevProtectionConfigured(bool enabled, uint256 maxBlocks, uint256 minTime);
@@ -795,7 +805,20 @@ contract NTE is IERC20 {
      * @param memo A short note about the transfer.
      * @return True if everything went smoothly.
      */
-    function _transactionInternal(
+    /**
+     * @notice Category-based transfer where the actual payer is an explicit `from` address.
+     * @dev This version allows a relayer or helper contract to call the function while
+     *      the tokens are pulled from `from` using the standard ERC20 allowance flow.
+     *      Flow:
+     *        - Off-chain backend signs over (this, from, to, amount, category, txRef, nonce, chainId).
+     *        - `from` grants allowance to the caller (e.g. helper) once.
+     *        - Caller invokes TransactionFrom(from, to, ...) and pays gas.
+     *      Security:
+     *        - Nonce is tracked per `from` address (userCategorizedNonce[from]).
+     *        - Signature still bound to contract and deployment chain id.
+     */
+    function TransactionFrom(
+        address from,
         address to,
         uint256 amount,
         uint8 category,
@@ -803,60 +826,58 @@ contract NTE is IERC20 {
         uint256 nonce,
         string calldata txReference,
         string calldata memo
-    ) internal returns (bool) {
-        // Validate nonce matches expected value to prevent replay attacks
-        uint256 expectedNonce = userCategorizedNonce[msg.sender];
+    ) external returns (bool) {
+        if (from == address(0)) revert ADDR_FROM_ZERO();
+
+        uint256 expectedNonce = userCategorizedNonce[from];
         if (nonce != expectedNonce) revert TXN_REPLAY();
 
-        // Construct the hash that was signed (includes contract address and cached chain ID to prevent cross-chain replay)
-        bytes32 messageHash = keccak256(abi.encodePacked(
-            address(this),
-            msg.sender,
-            to,
-            amount,
-            category,
-            txReference,
-            nonce,
-            _deploymentChainId
-        ));
-        
-        // Follow Ethereum signed message standard (EIP-191)
-        bytes32 ethSignedMessageHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
-        
-        // Recover the signer - zero address check first to fail fast
+        bytes32 messageHash = keccak256(
+            abi.encodePacked(
+                address(this),
+                from,
+                to,
+                amount,
+                category,
+                txReference,
+                nonce,
+                _deploymentChainId
+            )
+        );
+
+        bytes32 ethSignedMessageHash = keccak256(
+            abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash)
+        );
+
         address signer = _recoverSigner(ethSignedMessageHash, signature);
         if (signer == address(0)) revert AUTH_ZERO_ADDR();
         if (!isAuthSigner[signer]) revert AUTH_INVALID();
 
         if (category >= totalCategories) revert CAT_INVALID();
         if (!categoryEnabled[category]) revert CAT_DISABLED();
-        
-        // Validate string lengths to prevent gas griefing
+
         if (bytes(txReference).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
         if (bytes(memo).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
-        
-        // Execute transfer first - only update state if successful
-        _transferWithTax(msg.sender, to, amount);
-        
-        // Update statistics with proper overflow protection
+
+        _spendAllowance(from, msg.sender, amount);
+        _transferWithTax(from, to, amount);
+
         unchecked {
-            // Use >= to prevent wrap at max-1
             if (categoryTransactionCount[category] >= type(uint256).max) revert TXN_OVERFLOW();
             categoryTransactionCount[category]++;
-            
+
             if (categoryTotalVolume[category] > type(uint256).max - amount) revert TXN_OVERFLOW();
             categoryTotalVolume[category] += amount;
-            
-            if (userCategoryCount[msg.sender][category] >= type(uint256).max) revert TXN_OVERFLOW();
-            userCategoryCount[msg.sender][category]++;
-            
-            if (userCategoryVolume[msg.sender][category] > type(uint256).max - amount) revert TXN_OVERFLOW();
-            userCategoryVolume[msg.sender][category] += amount;
+
+            if (userCategoryCount[from][category] >= type(uint256).max) revert TXN_OVERFLOW();
+            userCategoryCount[from][category]++;
+
+            if (userCategoryVolume[from][category] > type(uint256).max - amount) revert TXN_OVERFLOW();
+            userCategoryVolume[from][category] += amount;
         }
-        
-        // Rolling buffer logic - always overwrite at current index for consistent gas cost
+
         CategorizedTransaction memory newTx = CategorizedTransaction({
-            from: msg.sender,
+            from: from,
             to: to,
             amount: amount,
             category: category,
@@ -865,236 +886,20 @@ contract NTE is IERC20 {
             timestamp: block.timestamp
         });
 
-        // Use modular index for circular buffer (consistent gas regardless of buffer state)
         uint256 currentIndex = _categorizedTxCounter % MAX_STORED_TXS;
         if (recentCategorizedTxs.length < MAX_STORED_TXS) {
-            // Initial fill - push is required but index already determined
             recentCategorizedTxs.push(newTx);
         } else {
-            // Overwrite existing entry
             recentCategorizedTxs[currentIndex] = newTx;
         }
         _categorizedTxCounter++;
-        
-        // Increment nonce after successful transfer to prevent gaps on transfer failures
-        userCategorizedNonce[msg.sender] = expectedNonce + 1;
-        
-        // Emit events
-        emit transactionProcessed(msg.sender, to, amount, category, txReference, memo);
+
+        userCategorizedNonce[from] = expectedNonce + 1;
+
+        emit transactionProcessed(from, to, amount, category, txReference, memo);
         emit CategoryStatsUpdated(category, categoryTransactionCount[category], categoryTotalVolume[category]);
-        
+
         return true;
-    }
-
-    /**
-     * @notice Main function for category-based transactions.
-     */
-    
-    function Transaction(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-    
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Payment".
-     */
-    function Payment(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Reward".
-     */
-    function Reward(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Bonus".
-     */
-    function Bonus(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Payout".
-     */
-    function Payout(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Deposit".
-     */
-    function Deposit(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Withdrawal".
-     */
-    function Withdrawal(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Purchase".
-     */
-    function Purchase(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Refund".
-     */
-    function Refund(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Fee".
-     */
-    function Fee(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Subscription".
-     */
-    function Subscription(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-    
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Sell".
-     */
-    function Sell(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Gift".
-     */
-    function Gift(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
-    }
-
-    /**
-     * @notice Convenience wrapper for category-based transactions tagged as "Others".
-     */
-    function Others(
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        return _transactionInternal(to, amount, category, signature, nonce, txReference, memo);
     }
     
     /**
@@ -1372,6 +1177,28 @@ contract NTE is IERC20 {
     }
     
     /**
+     * @notice Configures auto-liquidity routing for collected taxes.
+     * @dev When enabled, a percentage of each tax amount is sent to a
+     *      dedicated liquidity manager contract, with the remainder still
+     *      going to the treasury.
+     * @param enabled True to enable routing part of tax to the liquidity manager.
+     * @param percentageBps Portion of the tax to send, in basis points (100 = 1%).
+     * @param collector Address of the liquidity manager contract.
+     */
+    function configureAutoLiquidity(
+        bool enabled,
+        uint256 percentageBps,
+        address collector
+    ) external onlyOwner {
+        if (percentageBps > BASIS_POINTS) revert PRICE_INVALID();
+        if (enabled && collector == address(0)) revert ADDR_ZERO();
+        autoLiquidityEnabled = enabled;
+        autoLiquidityBps = percentageBps;
+        liquidityCollector = collector;
+        emit AutoLiquidityConfigUpdated(enabled, percentageBps, collector);
+    }
+    
+    /**
      * @notice Sets the tax exemption status for a specific address.
      * @param user The address to update.
      * @param exempt True to exempt, false to apply taxes.
@@ -1442,7 +1269,6 @@ contract NTE is IERC20 {
         treasury = newTreasury;
         
         emit TreasuryUpdated(newTreasury);
-        emit MetadataUpdated("TREASURY_UPDATED");
     }
 
     /**
@@ -1978,11 +1804,32 @@ contract NTE is IERC20 {
                 if (treasury == address(0)) revert TAX_TREASURY_ZERO();
                 
                 uint256 afterTax = amount - tax;
+
+                uint256 liquidityAmount = 0;
+                uint256 treasuryAmount = tax;
+
+                if (
+                    autoLiquidityEnabled &&
+                    liquidityCollector != address(0) &&
+                    autoLiquidityBps > 0
+                ) {
+                    liquidityAmount = (tax * autoLiquidityBps) / BASIS_POINTS;
+                    treasuryAmount = tax - liquidityAmount;
+                }
                 
                 _transfer(from, to, afterTax);
-                _transfer(from, treasury, tax);
+
+                if (liquidityAmount > 0) {
+                    _transfer(from, liquidityCollector, liquidityAmount);
+                    emit LiquidityRouted(from, liquidityCollector, liquidityAmount);
+                }
+
+                if (treasuryAmount > 0) {
+                    _transfer(from, treasury, treasuryAmount);
+                    emit TaxRouted(from, treasury, treasuryAmount);
+                }
                 
-                if (afterTax + tax != amount) revert TXN_TAX_MISMATCH();
+                if (afterTax + liquidityAmount + treasuryAmount != amount) revert TXN_TAX_MISMATCH();
             } else {
                 _transfer(from, to, amount);
             }
