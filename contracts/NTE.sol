@@ -431,6 +431,11 @@ contract NTE is IERC20 {
      */
     mapping(address => bool) public velocityLimitExempt;
 
+    /// @notice The staking contract allowed to lock balances
+    address public stakingContract;
+    /// @notice Amount of tokens locked in staking per user
+    mapping(address => uint256) public lockedForStaking;
+
     // ===================================================
     // EVENTS
     // ===================================================
@@ -1017,6 +1022,16 @@ contract NTE is IERC20 {
     function getCategorizedNonce(address account) public view returns (uint256) {
         return userCategorizedNonce[account];
     }
+
+    /**
+     * @notice Returns how many of an account's tokens are currently locked for staking.
+     * @dev This mirrors the internal lockedForStaking mapping for easier frontend access.
+     * @param account The address to check.
+     * @return The amount of tokens locked for staking.
+     */
+    function stakedBalanceOf(address account) external view returns (uint256) {
+        return lockedForStaking[account];
+    }
     
     /**
      * @notice Returns a comprehensive summary of token metadata.
@@ -1514,6 +1529,48 @@ contract NTE is IERC20 {
         emit DexPairUpdated(pair, status);
     }
 
+    /**
+     * @notice Sets the staking contract that can lock balances and mint rewards.
+     * @param _stakingContract The staking contract address.
+     */
+    function setStakingContract(address _stakingContract) external onlyOwner {
+        if (_stakingContract == address(0)) revert ADDR_ZERO();
+        stakingContract = _stakingContract;
+    }
+
+    /**
+     * @notice Called by the staking contract to lock tokens for a user.
+     * @param user The user whose tokens are locked.
+     * @param amount The amount to lock.
+     */
+    function lockFromStaking(address user, uint256 amount) external {
+        if (msg.sender != stakingContract) revert AUTH_INVALID();
+        if (user == address(0)) revert ADDR_INVALID();
+        if (amount == 0) revert TXN_AMOUNT_ZERO();
+        uint256 balance = _balances[user];
+        uint256 locked = lockedForStaking[user];
+        if (balance < locked + amount) revert TXN_EXCEEDS_BAL();
+        unchecked {
+            lockedForStaking[user] = locked + amount;
+        }
+    }
+
+    /**
+     * @notice Called by the staking contract to unlock tokens for a user.
+     * @param user The user whose tokens are unlocked.
+     * @param amount The amount to unlock.
+     */
+    function unlockFromStaking(address user, uint256 amount) external {
+        if (msg.sender != stakingContract) revert AUTH_INVALID();
+        if (user == address(0)) revert ADDR_INVALID();
+        if (amount == 0) revert TXN_AMOUNT_ZERO();
+        uint256 locked = lockedForStaking[user];
+        if (locked < amount) revert TXN_EXCEEDS_BAL();
+        unchecked {
+            lockedForStaking[user] = locked - amount;
+        }
+    }
+
     // ============================================
     // INTERNAL STUFF - For Our Eyes Only
     // ============================================
@@ -1559,6 +1616,8 @@ contract NTE is IERC20 {
         
         uint256 fromBalance = _balances[from];
         if (fromBalance < amount) revert TXN_EXCEEDS_BAL();
+        uint256 locked = lockedForStaking[from];
+        if (fromBalance - amount < locked) revert TXN_EXCEEDS_BAL();
         unchecked {
             _balances[from] = fromBalance - amount;
             _balances[to] += amount;
