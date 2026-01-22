@@ -5,9 +5,6 @@ interface IERC20Minimal {
     /// @notice Transfers `amount` tokens to address `to`.
     function transfer(address to, uint256 amount) external returns (bool);
 
-    /// @notice Transfers `amount` tokens from address `from` to address `to`.
-    function transferFrom(address from, address to, uint256 amount) external returns (bool);
-
     /// @notice Returns the token balance of `account`.
     function balanceOf(address account) external view returns (uint256);
 }
@@ -19,13 +16,21 @@ interface INTE is IERC20Minimal {
 
     /// @notice Returns whether the token is currently paused.
     function paused() external view returns (bool);
+
+    /// @notice Locks `amount` tokens for `user` inside the main token contract.
+    function lockFromStaking(address user, uint256 amount) external;
+
+    /// @notice Unlocks `amount` tokens for `user` inside the main token contract.
+    function unlockFromStaking(address user, uint256 amount) external;
+
 }
 
 /**
  * @title NTEStaking - Time-locked, multi-plan staking for NTE
  * @notice Users can stake NTE into different lockup plans (e.g. 30 days, 90 days)
- *         and earn rewards in NTE. Rewards are funded by the owner depositing
- *         NTE tokens into this contract.
+ *         and earn rewards in NTE. User principal stays in the main NTE token
+ *         contract (balances are locked there), and rewards are paid from this
+ *         contract's NTE balance.
  */
 contract NTEStaking {
     // ===================================================
@@ -60,6 +65,29 @@ contract NTEStaking {
         bool    withdrawn;
     }
 
+    /// @notice Read-only view struct for returning plan data with names.
+    struct LockPlanInfo {
+        uint256 planId;
+        uint256 lockDuration;
+        uint256 aprBps;
+        bool enabled;
+        string name;
+    }
+
+    /// @notice Read-only view struct for returning user stake data with plan names.
+    struct UserStakeInfo {
+        uint256 stakeId;
+        uint256 planId;
+        string planName;
+        uint256 amount;
+        uint256 startTime;
+        uint256 lockDuration;
+        uint256 aprBps;
+        uint256 claimedReward;
+        bool withdrawn;
+        uint256 pendingReward;
+    }
+
     // ===================================================
     // CONSTANTS
     // ===================================================
@@ -77,6 +105,9 @@ contract NTEStaking {
     INTE public immutable stakingToken;
 
     LockPlan[] public lockPlans;
+
+    /// @notice Optional human-readable names for each staking plan (e.g. "30d 10% APR").
+    mapping(uint256 => string) public stakePlanNames;
 
     mapping(uint256 => StakePosition) public stakes;
     mapping(address => uint256[]) public userStakeIds;
@@ -101,7 +132,6 @@ contract NTEStaking {
 
     event DepositsEnabledUpdated(bool enabled);
     event RewardCompounded(address indexed user, uint256 indexed stakeId, uint256 amount);
-    event RewardsWithdrawn(address indexed to, uint256 amount);
     event StakePlanExtended(address indexed user, uint256 indexed stakeId, uint256 fromPlanId, uint256 toPlanId);
 
     // ===================================================
@@ -156,6 +186,28 @@ contract NTEStaking {
         return userStakeIds[user];
     }
 
+    /// @notice Returns the current NTE balance held by this contract for rewards.
+    function rewardPoolBalance() external view returns (uint256) {
+        return stakingToken.balanceOf(address(this));
+    }
+
+    /// @notice Returns all staking plans with their configuration and optional names.
+    function getAllStakePlans() external view returns (LockPlanInfo[] memory) {
+        uint256 length = lockPlans.length;
+        LockPlanInfo[] memory plans = new LockPlanInfo[](length);
+        for (uint256 i = 0; i < length; i++) {
+            LockPlan storage plan = lockPlans[i];
+            plans[i] = LockPlanInfo({
+                planId: i,
+                lockDuration: plan.lockDuration,
+                aprBps: plan.aprBps,
+                enabled: plan.enabled,
+                name: stakePlanNames[i]
+            });
+        }
+        return plans;
+    }
+
     /**
      * @notice Returns all stake positions owned by `user`.
      */
@@ -166,6 +218,61 @@ contract NTEStaking {
             positions[i] = stakes[ids[i]];
         }
         return positions;
+    }
+
+    /// @notice Returns the total principal currently staked (locked) by `user` across all active stakes.
+    function userTotalStaked(address user) external view returns (uint256) {
+        uint256[] storage ids = userStakeIds[user];
+        uint256 total;
+        for (uint256 i = 0; i < ids.length; i++) {
+            StakePosition storage pos = stakes[ids[i]];
+            if (pos.user == user && !pos.withdrawn) {
+                total += pos.amount;
+            }
+        }
+        return total;
+    }
+
+    /// @notice Returns the total pending rewards across all active stakes owned by `user`.
+    function userTotalPendingRewards(address user) external view returns (uint256) {
+        uint256[] storage ids = userStakeIds[user];
+        uint256 total;
+        for (uint256 i = 0; i < ids.length; i++) {
+            StakePosition storage pos = stakes[ids[i]];
+            if (pos.user != user || pos.withdrawn) {
+                continue;
+            }
+            uint256 reward = pendingReward(ids[i]);
+            if (reward > 0) {
+                total += reward;
+            }
+        }
+        return total;
+    }
+
+    /// @notice Returns all stakes for `user` including plan names and current pending rewards.
+    function getUserStakeInfo(address user) external view returns (UserStakeInfo[] memory) {
+        uint256[] storage ids = userStakeIds[user];
+        uint256 length = ids.length;
+        UserStakeInfo[] memory info = new UserStakeInfo[](length);
+        for (uint256 i = 0; i < length; i++) {
+            uint256 stakeId = ids[i];
+            StakePosition storage pos = stakes[stakeId];
+            uint256 planId = pos.planId;
+            info[i] = UserStakeInfo({
+                stakeId: stakeId,
+                planId: planId,
+                planName: stakePlanNames[planId],
+                amount: pos.amount,
+                startTime: pos.startTime,
+                lockDuration: pos.lockDuration,
+                aprBps: pos.aprBps,
+                claimedReward: pos.claimedReward,
+                withdrawn: pos.withdrawn,
+                pendingReward: pendingReward(stakeId)
+            });
+        }
+        return info;
     }
 
     /// @notice Returns the unclaimed reward for a given stake.
@@ -221,6 +328,13 @@ contract NTEStaking {
         emit PlanUpdated(planId, lockDuration, aprBps, enabled);
     }
 
+    /// @notice Sets or updates a human-readable name for a staking plan.
+    /// @dev Names are optional metadata for frontends (e.g. "30 days", "90d 25% APR").
+    function setStakePlanName(uint256 planId, string calldata name) external onlyOwner validPlan(planId) {
+        require(bytes(name).length > 0, "NAME_EMPTY");
+        stakePlanNames[planId] = name;
+    }
+
     /// @notice Enables or disables new staking deposits globally.
     /// @dev Withdrawals and reward claims remain available while the token is not paused.
     function setDepositsEnabled(bool enabled) external onlyOwner {
@@ -228,25 +342,13 @@ contract NTEStaking {
         emit DepositsEnabledUpdated(enabled);
     }
 
-    /// @notice Allows the owner to withdraw reward tokens that exceed user principal.
-    /// @dev This never touches user principal (including compounded rewards).
-    function emergencyWithdrawRewards(address to, uint256 amount) external onlyOwner nonReentrant {
-        require(to != address(0), "TO_ZERO");
-        uint256 balance = stakingToken.balanceOf(address(this));
-        require(balance > totalStaked, "NO_EXCESS_REWARDS");
-        uint256 maxWithdraw = balance - totalStaked;
-        require(amount <= maxWithdraw, "WITHDRAW_EXCEEDS_EXCESS");
-
-        require(stakingToken.transfer(to, amount), "TRANSFER_FAIL");
-        emit RewardsWithdrawn(to, amount);
-    }
-
     // ===================================================
     // USER FUNCTIONS
     // ===================================================
 
     /// @notice Stakes `amount` of NTE into the selected lock plan.
-    /// @dev Caller must approve at least `amount` tokens to this contract first.
+    /// @dev Tokens remain in the main NTE contract; this call locks `amount`
+    ///      against the caller in NTE so they cannot be transferred.
     function stakeTokens(uint256 planId, uint256 amount)
         external
         nonReentrant
@@ -258,12 +360,9 @@ contract NTEStaking {
         LockPlan memory plan = lockPlans[planId];
         require(plan.enabled, "PLAN_DISABLED");
 
-        // Pull tokens from user and measure the actual received amount
-        uint256 balanceBefore = stakingToken.balanceOf(address(this));
-        require(stakingToken.transferFrom(msg.sender, address(this), amount), "TRANSFER_FROM_FAIL");
-        uint256 balanceAfter = stakingToken.balanceOf(address(this));
-        uint256 received = balanceAfter - balanceBefore;
-        require(received > 0, "ZERO_RECEIVED");
+        // Lock tokens in the main NTE contract instead of transferring them here
+        stakingToken.lockFromStaking(msg.sender, amount);
+        uint256 received = amount;
 
         uint256 stakeId = nextStakeId++;
         stakes[stakeId] = StakePosition({
@@ -284,17 +383,6 @@ contract NTEStaking {
         // Emit the actual received amount, which can differ from `amount`
         // for fee-on-transfer or deflationary tokens.
         emit Staked(msg.sender, stakeId, planId, received);
-    }
-
-    /// @notice Returns the amount of reward tokens held by this contract
-    ///         that exceed the total staked principal.
-    /// @dev Returns 0 if the contract balance is less than or equal to totalStaked.
-    function excessRewards() external view returns (uint256) {
-        uint256 balance = stakingToken.balanceOf(address(this));
-        if (balance <= totalStaked) {
-            return 0;
-        }
-        return balance - totalStaked;
     }
 
     /// @notice Claims only the rewards for a specific stake.
@@ -358,6 +446,10 @@ contract NTEStaking {
 
         totalStaked += reward;
 
+        // Send reward to user, then immediately lock it in the main token
+        require(stakingToken.transfer(msg.sender, reward), "REWARD_TRANSFER_FAIL");
+        stakingToken.lockFromStaking(msg.sender, reward);
+
         emit RewardCompounded(msg.sender, stakeId, reward);
     }
 
@@ -413,8 +505,7 @@ contract NTEStaking {
         pos.amount = 0;
 
         totalStaked -= principal;
-
-        require(stakingToken.transfer(msg.sender, principal), "PRINCIPAL_TRANSFER_FAIL");
+        stakingToken.unlockFromStaking(msg.sender, principal);
         emit Withdrawn(msg.sender, stakeId, principal, reward);
     }
 
@@ -431,8 +522,7 @@ contract NTEStaking {
         pos.claimedReward = 0;
 
         totalStaked -= principal;
-
-        require(stakingToken.transfer(msg.sender, principal), "PRINCIPAL_TRANSFER_FAIL");
+        stakingToken.unlockFromStaking(msg.sender, principal);
         emit EmergencyWithdraw(msg.sender, stakeId, principal);
     }
 
