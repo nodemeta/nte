@@ -57,7 +57,7 @@ pragma solidity ^0.8.28;
  * TXN_AMOUNT_ZERO  Need to send more than 0      TXN_EXCEEDS_BAL    Not enough tokens
  * ADDR_FROM_ZERO   Sending from zero address     TXN_OVERFLOW       Math overflow detected
  * ADDR_TO_ZERO     Sending to zero address       TXN_SUPPLY_ZERO    Initial supply can't be 0
- * TXN_REPLAY       This transaction was used
+ * TXN_REPLAY       This transaction was used     SIG_EXPIRED        Signature past deadline
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ APPROVALS [APRV_*]                                                      │
@@ -572,6 +572,7 @@ contract NTE is IERC20 {
     error TXN_OVERFLOW();
     error TXN_SUPPLY_ZERO();
     error TXN_REPLAY();
+    error SIG_EXPIRED();
     error TXN_TAX_MISMATCH();
     error ADDR_FROM_ZERO();
     error ADDR_TO_ZERO();
@@ -815,12 +816,13 @@ contract NTE is IERC20 {
      * @dev This version allows a relayer or helper contract to call the function while
      *      the tokens are pulled from `from` using the standard ERC20 allowance flow.
      *      Flow:
-     *        - Off-chain backend signs over (this, from, to, amount, category, txRef, nonce, chainId).
+     *        - Off-chain backend signs over (this, from, to, amount, category, txRef, nonce, deadline, chainId).
      *        - `from` grants allowance to the caller (e.g. helper) once.
      *        - Caller invokes TransactionFrom(from, to, ...) and pays gas.
      *      Security:
      *        - Nonce is tracked per `from` address (userCategorizedNonce[from]).
      *        - Signature still bound to contract and deployment chain id.
+     *        - Deadline ensures signatures expire and cannot be used indefinitely.
      */
     function TransactionFrom(
         address from,
@@ -829,10 +831,12 @@ contract NTE is IERC20 {
         uint8 category,
         bytes calldata signature,
         uint256 nonce,
+        uint256 deadline,
         string calldata txReference,
         string calldata memo
     ) external returns (bool) {
         if (from == address(0)) revert ADDR_FROM_ZERO();
+        if (block.timestamp > deadline) revert SIG_EXPIRED();
 
         uint256 expectedNonce = userCategorizedNonce[from];
         if (nonce != expectedNonce) revert TXN_REPLAY();
@@ -846,6 +850,7 @@ contract NTE is IERC20 {
                 category,
                 txReference,
                 nonce,
+                deadline,
                 _deploymentChainId
             )
         );
