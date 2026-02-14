@@ -23,8 +23,8 @@ pragma solidity 0.8.28;
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ SYSTEM & SECURITY [SYS_*, SEC_*]                                        │
  * └─────────────────────────────────────────────────────────────────────────┘
- * SYS_PAUSED       Contract is paused            SEC_REENTRY        No reentrancy allowed
- * SYS_DISABLED     Transfers are disabled        SEC_BOT_ACTIVE     Anti-bot period active
+ * SYS_DISABLED     Transfers are disabled        SEC_REENTRY        No reentrancy allowed
+ * SEC_BOT_ACTIVE   Anti-bot period active
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ DEX & LIQUIDITY [DEX_*]                                                 │
@@ -550,7 +550,6 @@ contract NTE is IERC20 {
     error AUTH_LOCKED();
     error AUTH_SAME_OWNER();
     error AUTH_INVALID();
-    error SYS_PAUSED();
     error SYS_DISABLED();
     error DEX_ROUTER();
     error DEX_FACTORY_ZERO();
@@ -1312,6 +1311,24 @@ contract NTE is IERC20 {
         treasury = newTreasury;
         
         emit TreasuryUpdated(newTreasury);
+    }
+
+    /**
+     * @notice Updates the token name and symbol.
+     * @dev Useful for rebranding or fixing typos. Can only be called by owner.
+     * @param newName The new token name.
+     * @param newSymbol The new token symbol.
+     */
+    function setNameAndSymbol(string calldata newName, string calldata newSymbol) external onlyOwner {
+        if (bytes(newName).length == 0) revert STR_EMPTY();
+        if (bytes(newSymbol).length == 0) revert STR_EMPTY();
+        if (bytes(newName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
+        if (bytes(newSymbol).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
+        
+        _name = newName;
+        _symbol = newSymbol;
+        
+        emit NameSymbolUpdated(newName, newSymbol);
     }
 
     /**
