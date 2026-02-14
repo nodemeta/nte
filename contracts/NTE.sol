@@ -395,6 +395,24 @@ contract NTE is IERC20 {
     uint256 private constant MAX_STRING_LENGTH = 256;
     /// @notice Maximum wait time for anti-dump rules (30 days)
     uint256 private constant MAX_ANTI_DUMP_COOLDOWN = 30 days;
+    /// @notice Ownership lock period before renouncement or emergency actions (30 days)
+    uint256 private constant OWNERSHIP_LOCK_PERIOD = 30 days;
+    /// @notice Maximum tax rate for any tax category (25%)
+    uint256 private constant MAX_TAX_LIMIT = 2500;
+    /// @notice Maximum combined total of all tax rates (50%)
+    uint256 private constant MAX_TOTAL_TAX_LIMIT = 5000;
+    /// @notice Maximum allowed change in tax rate per update (2.5%)
+    uint256 private constant MAX_TAX_CHANGE_DELTA = 250;
+    /// @notice Maximum anti-dump percentage (100%)
+    uint256 private constant MAX_ANTI_DUMP_PERCENT = 100;
+    /// @notice Minimum price impact threshold in basis points (0.1%)
+    uint256 private constant MIN_PRICE_IMPACT_BPS = 10;
+    /// @notice Maximum MEV protection block difference
+    uint256 private constant MAX_MEV_BLOCKS = 10;
+    /// @notice Maximum MEV protection time threshold (5 minutes)
+    uint256 private constant MAX_MEV_MIN_TIME = 300;
+    /// @notice Minimum hold time before sell to prevent rapid buy-sell (60 seconds)
+    uint256 private constant MIN_HOLD_BEFORE_SELL = 60;
 
     
     /// @notice The last time we updated the tax rates
@@ -1132,7 +1150,7 @@ contract NTE is IERC20 {
      */
     function renounceOwnership() public onlyOwner {
         if (_paused) revert SYS_DISABLED();
-        if (block.timestamp <= launchTime + 30 days) revert AUTH_LOCKED();
+        if (block.timestamp <= launchTime + OWNERSHIP_LOCK_PERIOD) revert AUTH_LOCKED();
         address previousOwner = _owner;
         _owner = address(0);
         emit OwnershipTransferred(previousOwner, address(0));
@@ -1149,9 +1167,6 @@ contract NTE is IERC20 {
         _owner = newOwner;
         emit OwnershipTransferred(previousOwner, newOwner);
     }
-    
-    /// @notice Maximum allowed sell tax (safety limit)
-    uint256 public constant MAX_SELL_TAX_LIMIT = 2500;
     
     /**
      * @notice Get a quick estimate of what happens when you sell.
@@ -1191,19 +1206,19 @@ contract NTE is IERC20 {
         uint256 newSellTaxBps,
         uint256 newTransferTaxBps
     ) external onlyOwner {
-        if (newBuyTaxBps > 2500) revert TAX_BUY_HIGH();
-        if (newSellTaxBps > MAX_SELL_TAX_LIMIT) revert TAX_SELL_HIGH();
-        if (newTransferTaxBps > 2500) revert TAX_XFER_HIGH();
-        if (newBuyTaxBps + newSellTaxBps + newTransferTaxBps > 5000) revert TAX_TOTAL_HIGH();
+        if (newBuyTaxBps > MAX_TAX_LIMIT) revert TAX_BUY_HIGH();
+        if (newSellTaxBps > MAX_TAX_LIMIT) revert TAX_SELL_HIGH();
+        if (newTransferTaxBps > MAX_TAX_LIMIT) revert TAX_XFER_HIGH();
+        if (newBuyTaxBps + newSellTaxBps + newTransferTaxBps > MAX_TOTAL_TAX_LIMIT) revert TAX_TOTAL_HIGH();
         if (block.timestamp < _lastTaxChangeTime + TAX_CHANGE_COOLDOWN) revert TAX_COOLDOWN();
         
         uint256 buyChange = newBuyTaxBps > buyTaxBps ? newBuyTaxBps - buyTaxBps : buyTaxBps - newBuyTaxBps;
         uint256 sellChange = newSellTaxBps > sellTaxBps ? newSellTaxBps - sellTaxBps : sellTaxBps - newSellTaxBps;
         uint256 transferChange = newTransferTaxBps > transferTaxBps ? newTransferTaxBps - transferTaxBps : transferTaxBps - newTransferTaxBps;
         
-        if (buyChange > 250) revert TAX_BUY_DELTA();
-        if (sellChange > 250) revert TAX_SELL_DELTA();
-        if (transferChange > 250) revert TAX_XFER_DELTA();
+        if (buyChange > MAX_TAX_CHANGE_DELTA) revert TAX_BUY_DELTA();
+        if (sellChange > MAX_TAX_CHANGE_DELTA) revert TAX_SELL_DELTA();
+        if (transferChange > MAX_TAX_CHANGE_DELTA) revert TAX_XFER_DELTA();
         
         buyTaxBps = newBuyTaxBps;
         sellTaxBps = newSellTaxBps;
@@ -1333,7 +1348,7 @@ contract NTE is IERC20 {
      * @param cooldownTime Cooldown period between large sells.
      */
     function setAntiDumpConfig(bool enabled, uint256 maxPercentage, uint256 cooldownTime) external onlyOwner {
-        if (maxPercentage == 0 || maxPercentage > 100) revert DUMP_PERCENT();
+        if (maxPercentage == 0 || maxPercentage > MAX_ANTI_DUMP_PERCENT) revert DUMP_PERCENT();
         if (cooldownTime > MAX_ANTI_DUMP_COOLDOWN) revert CD_TOO_HIGH();
         antiDumpEnabled = enabled;
         maxSellPercentage = maxPercentage;
@@ -1347,8 +1362,8 @@ contract NTE is IERC20 {
      * @param maxImpactBasisPoints Maximum allowed price impact in basis points.
      */
     function setPriceImpactLimitConfig(bool enabled, uint256 maxImpactBasisPoints) external onlyOwner {
-        if (enabled && maxImpactBasisPoints < 10) revert PRICE_MIN_IMPACT();
-        if (maxImpactBasisPoints > 10000) revert PRICE_INVALID();
+        if (enabled && maxImpactBasisPoints < MIN_PRICE_IMPACT_BPS) revert PRICE_MIN_IMPACT();
+        if (maxImpactBasisPoints > BASIS_POINTS) revert PRICE_INVALID();
         priceImpactLimitEnabled = enabled;
         maxPriceImpactPercent = maxImpactBasisPoints;
         emit PriceImpactLimitConfigUpdated(enabled, maxImpactBasisPoints);
@@ -1412,7 +1427,7 @@ contract NTE is IERC20 {
      * @param amount The amount to withdraw.
      */
     function emergencyWithdrawBNB(address payable to, uint256 amount) external onlyOwner nonReentrant {
-        if (block.timestamp <= launchTime + 30 days) revert EMG_WAIT_30D();
+        if (block.timestamp <= launchTime + OWNERSHIP_LOCK_PERIOD) revert EMG_WAIT_30D();
         if (to == address(0)) revert EMG_INVALID_RECIP();
         if (amount > address(this).balance) revert EMG_INSUF_BAL_BNB();
         (bool success, ) = to.call{value: amount}("");
@@ -1430,8 +1445,8 @@ contract NTE is IERC20 {
     function setMevProtectionConfig(bool enabled, uint256 maxBlocks, uint256 minTime) external onlyOwner {
         // When enabling protection, at least one of the parameters must be non-zero
         if (enabled && maxBlocks == 0 && minTime == 0) revert MEV_CONFIG_INVALID();
-        if (maxBlocks > 10) revert MEV_BLOCKS_HIGH();
-        if (minTime > 300) revert MEV_TIME_HIGH();
+        if (maxBlocks > MAX_MEV_BLOCKS) revert MEV_BLOCKS_HIGH();
+        if (minTime > MAX_MEV_MIN_TIME) revert MEV_TIME_HIGH();
 
         bool previous = mevProtectionEnabled;
         mevProtectionEnabled = enabled;
@@ -1464,7 +1479,7 @@ contract NTE is IERC20 {
         if (enabled) {
             if (maxTx == 0 || timeWindow == 0) revert VEL_CONFIG_INVALID();
             if (maxTx > MAX_VELOCITY_BUFFER) revert VEL_LIMIT_HIGH();
-            if (timeWindow > 86400) revert VEL_LIMIT_HIGH();
+            if (timeWindow > MAX_COOLDOWN) revert VEL_LIMIT_HIGH();
         }
         velocityLimitEnabled = enabled;
         maxTxPerWindow = maxTx;
@@ -1842,7 +1857,7 @@ contract NTE is IERC20 {
                     revert MEV_VELOCITY();
                 }
                 // Even if not brand new, you can't sell if you just bought 60 seconds ago
-                if (lastTradeTime[from] != 0 && block.timestamp - lastTradeTime[from] < 60) {
+                if (lastTradeTime[from] != 0 && block.timestamp - lastTradeTime[from] < MIN_HOLD_BEFORE_SELL) {
                     emit MevAttackPrevented(from, block.number, "NEW_WALLET_RAPID_SELL");
                     revert MEV_VELOCITY();
                 }
@@ -1882,7 +1897,7 @@ contract NTE is IERC20 {
         
         // Anti-dump - preventing massive sells that crash the price
         if (antiDumpEnabled && isToPair && !taxExempt[from]) {
-            uint256 maxSellAmount = (_totalSupply * maxSellPercentage) / 10000;
+            uint256 maxSellAmount = (_totalSupply * maxSellPercentage) / BASIS_POINTS;
             if (amount > maxSellAmount) revert DUMP_EXCEEDS();
             
             if (cachedFromLastTrade != 0 && block.timestamp < cachedFromLastTrade + sellCooldown) revert CD_SELL();
