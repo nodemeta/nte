@@ -706,18 +706,8 @@ contract NTE is IERC20 {
             }
         }
         
-        antiDumpEnabled = false;
         maxSellPercentage = 100;
-        sellCooldown = 0;
-        
-        whitelistEnabled = false;
-        
-        totalCategories = 0;
-        
-        priceImpactLimitEnabled = false;
         maxPriceImpactPercent = 500;
-        
-        walletCooldownEnabled = false;
         globalCooldownSeconds = 30;
         
         mevProtectionEnabled = true;
@@ -728,7 +718,6 @@ contract NTE is IERC20 {
         antiBotDuration = 3900;
         launchTime = block.timestamp;
         
-        velocityLimitEnabled = false;
         maxTxPerWindow = 10;
         velocityTimeWindow = 300;
         
