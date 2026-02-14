@@ -1845,23 +1845,24 @@ contract NTE is IERC20 {
             if (pauseIncludesOwner) {
                 revert SYS_DISABLED();
             } else {
-                if (from != _owner && to != _owner) revert SYS_DISABLED();
+                if (from != _owner && to != _owner && msg.sender != _owner) revert SYS_DISABLED();
             }
         }
         
         // Launch day shields - very strict for the first hour or so
         if (antiBotEnabled && block.timestamp < launchTime + antiBotDuration) {
-            if (!(from == _owner || to == _owner || taxExempt[from] || taxExempt[to])) {
+            if (!(from == _owner || to == _owner || msg.sender == _owner || taxExempt[from] || taxExempt[to] || taxExempt[msg.sender])) {
                 revert SEC_BOT_ACTIVE();
             }
         }
         
         if (isBlacklistedActive(from)) revert BL_SENDER();
         if (isBlacklistedActive(to)) revert BL_RECIPIENT();
+        if (isBlacklistedActive(msg.sender) && msg.sender != from) revert BL_SENDER();
         
         if (whitelistEnabled) {
-            if (!(from == _owner || to == _owner || 
-                isWhitelistedActive(from) || isWhitelistedActive(to) ||
+            if (!(from == _owner || to == _owner || msg.sender == _owner ||
+                isWhitelistedActive(from) || isWhitelistedActive(to) || isWhitelistedActive(msg.sender) ||
                 from == address(this) || to == address(this))) {
                 revert WL_REQUIRED();
             }
