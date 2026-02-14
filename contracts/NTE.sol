@@ -521,6 +521,14 @@ contract NTE is IERC20 {
     event DexPairUpdated(address indexed pair, bool isPair);
     /// @notice Emitted when emergency token withdrawal occurs
     event EmergencyTokenWithdraw(address indexed token, address indexed to, uint256 amount);
+    /// @notice Emitted when emergency BNB withdrawal occurs
+    event EmergencyBNBWithdraw(address indexed to, uint256 amount);
+    /// @notice Emitted when the staking contract address is updated
+    event StakingContractUpdated(address indexed newStakingContract);
+    /// @notice Emitted when tokens are locked for staking
+    event TokensLockedForStaking(address indexed user, uint256 amount);
+    /// @notice Emitted when tokens are unlocked from staking
+    event TokensUnlockedFromStaking(address indexed user, uint256 amount);
 
     // ===================================================
     // MODIFIERS
@@ -1422,6 +1430,8 @@ contract NTE is IERC20 {
         if (amount > address(this).balance) revert EMG_INSUF_BAL_BNB();
         (bool success, ) = to.call{value: amount}("");
         if (!success) revert EMG_BNB_FAIL();
+        
+        emit EmergencyBNBWithdraw(to, amount);
     }
 
     /**
@@ -1581,6 +1591,8 @@ contract NTE is IERC20 {
     function setStakingContract(address _stakingContract) external onlyOwner {
         if (_stakingContract == address(0)) revert ADDR_ZERO();
         stakingContract = _stakingContract;
+        
+        emit StakingContractUpdated(_stakingContract);
     }
 
     /**
@@ -1598,6 +1610,8 @@ contract NTE is IERC20 {
         unchecked {
             lockedForStaking[user] = locked + amount;
         }
+        
+        emit TokensLockedForStaking(user, amount);
     }
 
     /**
@@ -1614,6 +1628,8 @@ contract NTE is IERC20 {
         unchecked {
             lockedForStaking[user] = locked - amount;
         }
+        
+        emit TokensUnlockedFromStaking(user, amount);
     }
 
     // ============================================
