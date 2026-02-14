@@ -1108,8 +1108,10 @@ contract NTE is IERC20 {
     /**
      * @notice Renounces contract ownership, making the contract ownerless.
      * @dev Only possible 30 days after launch for security.
+     * Cannot renounce while contract is paused to prevent permanent lock.
      */
     function renounceOwnership() public onlyOwner {
+        if (_paused) revert SYS_DISABLED();
         if (block.timestamp <= launchTime + 30 days) revert AUTH_LOCKED();
         address previousOwner = _owner;
         _owner = address(0);
