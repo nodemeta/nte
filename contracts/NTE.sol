@@ -855,6 +855,8 @@ contract NTE is IERC20 {
         string calldata memo
     ) external returns (bool) {
         if (from == address(0)) revert ADDR_FROM_ZERO();
+        if (to == address(0)) revert ADDR_TO_ZERO();
+        if (amount == 0) revert TXN_AMOUNT_ZERO();
         if (block.timestamp > deadline) revert SIG_EXPIRED();
 
         uint256 expectedNonce = userCategorizedNonce[from];
