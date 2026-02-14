@@ -49,6 +49,7 @@ pragma solidity 0.8.28;
  * └─────────────────────────────────────────────────────────────────────────┘
  * BL_OWNER         Can't blacklist the owner     BL_SENDER          Sender is blacklisted
  * BL_CONTRACT      Can't blacklist this contract BL_RECIPIENT       Recipient is blacklisted
+ * BL_EXPIRY_INVALID Invalid expiry timestamp     WL_EXPIRY_INVALID  Invalid expiry timestamp
  * WL_REQUIRED      You need to be whitelisted
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
@@ -58,6 +59,7 @@ pragma solidity 0.8.28;
  * ADDR_FROM_ZERO   Sending from zero address     TXN_OVERFLOW       Math overflow detected
  * ADDR_TO_ZERO     Sending to zero address       TXN_SUPPLY_ZERO    Initial supply can't be 0
  * TXN_REPLAY       This transaction was used     SIG_EXPIRED        Signature past deadline
+ * TXN_TAX_MISMATCH Internal tax math error
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ APPROVALS [APRV_*]                                                      │
@@ -77,6 +79,7 @@ pragma solidity 0.8.28;
  * └─────────────────────────────────────────────────────────────────────────┘
  * MEV_BLOCKS_HIGH  Block limit set too high      MEV_TIME_HIGH      Time window set too high
  * MEV_VELOCITY     Too many trades in window     MEV_TOO_FAST       Wait a bit between trades
+ * MEV_CONFIG_INVALID Config needs at least one param set
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ TIMERS & LIMITS [CD_*, LIMIT_*]                                         │
@@ -92,9 +95,11 @@ pragma solidity 0.8.28;
  * PRICE_INVALID    Impact must be 0.1% to 100%
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
- * TXN_REPLAY       This transaction was used     TXN_TAX_MISMATCH   Internal tax math mismatch
+ * │ CATEGORIES & STRINGS [CAT_*, STR_*]                                     │
  * └─────────────────────────────────────────────────────────────────────────┘
  * CAT_INVALID      This category doesn't exist   CAT_DISABLED       Category is turned off
+ * CAT_NAME_INVALID Invalid category name         STR_TOO_LONG       String exceeds max length
+ * STR_EMPTY        String cannot be empty
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ EMERGENCY RESCUE [EMG_*]                                                │
@@ -103,6 +108,11 @@ pragma solidity 0.8.28;
  * EMG_INVALID_TOKEN Token address is invalid      EMG_INSUF_BAL_BNB  Not enough BNB
  * EMG_ZERO_RECIP   Recipient is zero address      EMG_BNB_FAIL       BNB transfer failed
  * EMG_INSUF_BAL    Not enough balance            EMG_WAIT_30D       Wait 30 days after launch
+ *
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ VELOCITY LIMITS [VEL_*]                                                 │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * VEL_CONFIG_INVALID Invalid velocity config     VEL_LIMIT_HIGH     Velocity limit too high
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ GENERAL CHECKS [ADDR_*]                                                 │
@@ -566,7 +576,9 @@ contract NTE is IERC20 {
     error BL_CONTRACT();
     error BL_SENDER();
     error BL_RECIPIENT();
+    error BL_EXPIRY_INVALID();
     error WL_REQUIRED();
+    error WL_EXPIRY_INVALID();
     error TXN_AMOUNT_ZERO();
     error TXN_EXCEEDS_BAL();
     error TXN_OVERFLOW();
@@ -586,6 +598,7 @@ contract NTE is IERC20 {
     error BURN_EXCEEDS();
     error MEV_VELOCITY();
     error MEV_TOO_FAST();
+    error MEV_CONFIG_INVALID();
     error CD_SENDER();
     error CD_RECIPIENT();
     error CD_SELL();
@@ -596,6 +609,9 @@ contract NTE is IERC20 {
     error PRICE_TOO_HIGH();
     error CAT_INVALID();
     error CAT_DISABLED();
+    error CAT_NAME_INVALID();
+    error STR_TOO_LONG();
+    error STR_EMPTY();
     error EMG_INVALID_TOKEN();
     error EMG_ZERO_RECIP();
     error EMG_INSUF_BAL();
@@ -613,6 +629,9 @@ contract NTE is IERC20 {
     error MEV_BLOCKS_HIGH();
     error MEV_TIME_HIGH();
     error CD_TOO_HIGH();
+    error VEL_CONFIG_INVALID();
+    error VEL_LIMIT_HIGH();
+    error DEX_PAIR_NOT_CONTRACT();
 
     /**
      * @dev Sets up the initial state of the NTE token.
@@ -866,8 +885,8 @@ contract NTE is IERC20 {
         if (category >= totalCategories) revert CAT_INVALID();
         if (!categoryEnabled[category]) revert CAT_DISABLED();
 
-        if (bytes(txReference).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
-        if (bytes(memo).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
+        if (bytes(txReference).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
+        if (bytes(memo).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
 
         _spendAllowance(from, msg.sender, amount);
         _transferWithTax(from, to, amount);
@@ -940,8 +959,8 @@ contract NTE is IERC20 {
      */
     function updateCategoryName(uint8 category, string calldata newName) external onlyOwner {
         if (category >= totalCategories) revert CAT_INVALID();
-        if (bytes(newName).length == 0) revert ADDR_INVALID();
-        if (bytes(newName).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
+        if (bytes(newName).length == 0) revert STR_EMPTY();
+        if (bytes(newName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
         categoryNames[category] = newName;
         emit CategoryUpdated(category, newName);
     }
@@ -952,8 +971,8 @@ contract NTE is IERC20 {
      * @return categoryId The ID assigned to the new category.
      */
     function addCategory(string calldata categoryName) external onlyOwner returns (uint8 categoryId) {
-        if (bytes(categoryName).length == 0) revert ADDR_INVALID();
-        if (bytes(categoryName).length > MAX_STRING_LENGTH) revert ADDR_INVALID();
+        if (bytes(categoryName).length == 0) revert STR_EMPTY();
+        if (bytes(categoryName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
         if (totalCategories == 255) revert CAT_INVALID();
         
         categoryId = totalCategories;
@@ -1243,7 +1262,7 @@ contract NTE is IERC20 {
         if (account == address(this)) revert BL_CONTRACT();
         isBlacklisted[account] = blacklisted;
         if (blacklisted && expiryTime > 0) {
-            if (expiryTime <= block.timestamp) revert ADDR_INVALID();
+            if (expiryTime <= block.timestamp) revert BL_EXPIRY_INVALID();
             blacklistExpiry[account] = expiryTime;
             emit BlacklistExpirySet(account, expiryTime);
         } else {
@@ -1271,7 +1290,7 @@ contract NTE is IERC20 {
         if (account == address(0)) revert ADDR_INVALID();
         isWhitelisted[account] = whitelisted;
         if (whitelisted && expiryTime > 0) {
-            if (expiryTime <= block.timestamp) revert ADDR_INVALID();
+            if (expiryTime <= block.timestamp) revert WL_EXPIRY_INVALID();
             whitelistExpiry[account] = expiryTime;
             emit WhitelistExpirySet(account, expiryTime);
         } else {
@@ -1394,7 +1413,7 @@ contract NTE is IERC20 {
      */
     function setMevProtectionConfig(bool enabled, uint256 maxBlocks, uint256 minTime) external onlyOwner {
         // When enabling protection, at least one of the parameters must be non-zero
-        if (enabled && maxBlocks == 0 && minTime == 0) revert MEV_TIME_HIGH();
+        if (enabled && maxBlocks == 0 && minTime == 0) revert MEV_CONFIG_INVALID();
         if (maxBlocks > 10) revert MEV_BLOCKS_HIGH();
         if (minTime > 300) revert MEV_TIME_HIGH();
 
@@ -1427,9 +1446,9 @@ contract NTE is IERC20 {
      */
     function setVelocityLimitConfig(bool enabled, uint256 maxTx, uint256 timeWindow) external onlyOwner {
         if (enabled) {
-            if (maxTx == 0 || timeWindow == 0) revert ADDR_INVALID();
-            if (maxTx > MAX_VELOCITY_BUFFER) revert CD_TOO_HIGH();
-            if (timeWindow > 86400) revert CD_TOO_HIGH();
+            if (maxTx == 0 || timeWindow == 0) revert VEL_CONFIG_INVALID();
+            if (maxTx > MAX_VELOCITY_BUFFER) revert VEL_LIMIT_HIGH();
+            if (timeWindow > 86400) revert VEL_LIMIT_HIGH();
         }
         velocityLimitEnabled = enabled;
         maxTxPerWindow = maxTx;
@@ -1529,7 +1548,7 @@ contract NTE is IERC20 {
      */
     function setDexPairStatus(address pair, bool status) external onlyOwner {
         if (pair == address(0)) revert ADDR_INVALID();
-        if (!_isContract(pair)) revert DEX_ROUTER(); // Reuse error - pair must be a contract
+        if (!_isContract(pair)) revert DEX_PAIR_NOT_CONTRACT();
         // Prevent accidentally disabling the main pancakePair
         if (pair == pancakePair && !status) revert DEX_PAIR_CHECK();
         isPancakePair[pair] = status;
