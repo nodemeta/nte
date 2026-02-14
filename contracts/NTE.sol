@@ -223,7 +223,7 @@ interface IERC20 {
      * @param referenceId External reference ID for tracking.
      * @param memo Optional note about the transfer.
      */
-    event transactionProcessed(address indexed from, address indexed to, uint256 value, uint8 category, string referenceId, string memo);
+    event TransactionProcessed(address indexed from, address indexed to, uint256 value, uint8 category, string referenceId, string memo);
 }
 
 contract NTE is IERC20 {
@@ -833,13 +833,13 @@ contract NTE is IERC20 {
      *      Flow:
      *        - Off-chain backend signs over (this, from, to, amount, category, txRef, nonce, deadline, chainId).
      *        - `from` grants allowance to the caller (e.g. helper) once.
-     *        - Caller invokes TransactionFrom(from, to, ...) and pays gas.
+     *        - Caller invokes transactionFrom(from, to, ...) and pays gas.
      *      Security:
      *        - Nonce is tracked per `from` address (userCategorizedNonce[from]).
      *        - Signature still bound to contract and deployment chain id.
      *        - Deadline ensures signatures expire and cannot be used indefinitely.
      */
-    function TransactionFrom(
+    function transactionFrom(
         address from,
         address to,
         uint256 amount,
@@ -923,7 +923,7 @@ contract NTE is IERC20 {
 
         userCategorizedNonce[from] = expectedNonce + 1;
 
-        emit transactionProcessed(from, to, amount, category, txReference, memo);
+        emit TransactionProcessed(from, to, amount, category, txReference, memo);
         emit CategoryStatsUpdated(category, categoryTransactionCount[category], categoryTotalVolume[category]);
 
         return true;
