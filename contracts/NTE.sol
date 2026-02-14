@@ -1915,8 +1915,8 @@ contract NTE is IERC20 {
         } else if (isPancakePair[from] && isPancakePair[to]) {
             // Pool-to-pool move (usually arbitrage)
             taxBps = sellTaxBps;
-        } else {
-            // Just a regular P2P transfer
+        } else if (pancakeRouter != from && pancakeRouter != to) {
+            // Just a regular P2P transfer (exclude router to prevent double taxation on liquidity removal)
             taxBps = transferTaxBps;
         }
         
