@@ -1834,7 +1834,7 @@ contract NTE is IERC20 {
         
         // Anti-dump - preventing massive sells that crash the price
         if (antiDumpEnabled && isToPair && !taxExempt[from]) {
-            uint256 maxSellAmount = (_totalSupply * maxSellPercentage) / 100;
+            uint256 maxSellAmount = (_totalSupply * maxSellPercentage) / 10000;
             if (amount > maxSellAmount) revert DUMP_EXCEEDS();
             
             if (cachedFromLastTrade != 0 && block.timestamp < cachedFromLastTrade + sellCooldown) revert CD_SELL();
