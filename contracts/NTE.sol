@@ -19,6 +19,7 @@ pragma solidity 0.8.28;
  * AUTH_LOCKED      Ownership lock active (30d)  AUTH_SAME_OWNER    Already the current owner
  * AUTH_INVALID     Invalid auth signer key       AUTH_ALREADY_SET   Signer is already authorized
  * AUTH_NOT_SET     Signer isn't authorized       AUTH_ZERO_ADDR     Signer can't be zero address
+ * AUTH_NOT_PENDING_OWNER  Not the pending owner  AUTH_NO_PENDING_TRANSFER  No pending ownership transfer
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ SYSTEM & SECURITY [SYS_*, SEC_*]                                        │
@@ -241,6 +242,9 @@ contract NTE is IERC20 {
     
     /// @notice The current captain of the contract
     address private _owner;
+    
+    /// @notice The pending owner waiting to accept ownership
+    address private _pendingOwner;
     
     /// @notice A master switch to stop all transfers if something goes wrong
     bool private _paused;
@@ -470,6 +474,8 @@ contract NTE is IERC20 {
     
     /// @notice Emitted when contract ownership changes
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    /// @notice Emitted when ownership transfer is initiated
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     /// @notice Emitted when contract is paused
     event Paused(address account);
     /// @notice Emitted when contract is unpaused
@@ -576,6 +582,8 @@ contract NTE is IERC20 {
     error AUTH_LOCKED();
     error AUTH_SAME_OWNER();
     error AUTH_INVALID();
+    error AUTH_NOT_PENDING_OWNER();
+    error AUTH_NO_PENDING_TRANSFER();
     error SYS_DISABLED();
     error DEX_ROUTER();
     error DEX_FACTORY_ZERO();
@@ -1158,14 +1166,44 @@ contract NTE is IERC20 {
     
     /**
      * @notice Transfers contract ownership to a new address.
+     * @dev Initiates a two-step ownership transfer. The new owner must call acceptOwnership() to complete the transfer.
      * @param newOwner The address of the new owner.
      */
     function transferOwnership(address newOwner) external onlyOwner {
         if (newOwner == address(0)) revert AUTH_ZERO_OWNER();
         if (newOwner == _owner) revert AUTH_SAME_OWNER();
+        _pendingOwner = newOwner;
+        emit OwnershipTransferStarted(_owner, newOwner);
+    }
+    
+    /**
+     * @notice Accepts ownership transfer.
+     * @dev Can only be called by the pending owner to complete the two-step transfer process.
+     */
+    function acceptOwnership() external {
+        if (msg.sender != _pendingOwner) revert AUTH_NOT_PENDING_OWNER();
         address previousOwner = _owner;
-        _owner = newOwner;
-        emit OwnershipTransferred(previousOwner, newOwner);
+        _owner = _pendingOwner;
+        _pendingOwner = address(0);
+        emit OwnershipTransferred(previousOwner, _owner);
+    }
+    
+    /**
+     * @notice Cancels a pending ownership transfer.
+     * @dev Can only be called by the current owner.
+     */
+    function cancelOwnershipTransfer() external onlyOwner {
+        if (_pendingOwner == address(0)) revert AUTH_NO_PENDING_TRANSFER();
+        _pendingOwner = address(0);
+        emit OwnershipTransferStarted(_owner, address(0));
+    }
+    
+    /**
+     * @notice Returns the address of the pending owner.
+     * @return The address of the pending owner, or zero address if no transfer is pending.
+     */
+    function pendingOwner() external view returns (address) {
+        return _pendingOwner;
     }
     
     /**
