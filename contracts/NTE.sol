@@ -1152,7 +1152,7 @@ contract NTE is IERC20 {
         netOutput = amount - taxAmount;
         
         // 2. Calculate Price Impact
-        impactBps = _calculatePriceImpact(amount);
+        impactBps = _calculatePriceImpact(amount, pancakePair);
         
         return (netOutput, taxAmount, impactBps);
     }
@@ -1828,7 +1828,7 @@ contract NTE is IERC20 {
         }
         
         if (priceImpactLimitEnabled && isToPair && !priceImpactExempt[from] && pancakeRouter != address(0)) {
-            uint256 priceImpact = _calculatePriceImpact(amount);
+            uint256 priceImpact = _calculatePriceImpact(amount, to);
             if (priceImpact > maxPriceImpactPercent) revert PRICE_TOO_HIGH();
         }
         
@@ -1935,16 +1935,17 @@ contract NTE is IERC20 {
      * @dev Predicting how much the price will move if you sell this amount.
      *      We use the standard AMM formula: (x + dx)(y - dy) = xy
      * @param amount Tokens being sold.
+     * @param pair The destination pair address to calculate impact for.
      * @return impact Price impact in basis points (100 = 1%).
      */
-    function _calculatePriceImpact(uint256 amount) internal view returns (uint256 impact) {
-        if (pancakeRouter == address(0) || pancakePair == address(0) || amount == 0) return 0;
+    function _calculatePriceImpact(uint256 amount, address pair) internal view returns (uint256 impact) {
+        if (pancakeRouter == address(0) || pair == address(0) || amount == 0) return 0;
 
-        (uint256 reserve0, uint256 reserve1, ) = IPancakePair(pancakePair).getReserves();
+        (uint256 reserve0, uint256 reserve1, ) = IPancakePair(pair).getReserves();
         
         uint256 reserveToken;
         uint256 reserveOther;
-        if (IPancakePair(pancakePair).token0() == address(this)) {
+        if (IPancakePair(pair).token0() == address(this)) {
             reserveToken = reserve0;
             reserveOther = reserve1;
         } else {
