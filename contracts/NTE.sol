@@ -750,21 +750,21 @@ contract NTE is IERC20 {
     /**
      * @notice Returns the token name.
      */
-    function name() public view returns (string memory) {
+    function name() external view returns (string memory) {
         return _name;
     }
     
     /**
      * @notice Returns the token symbol (ticker).
      */
-    function symbol() public view returns (string memory) {
+    function symbol() external view returns (string memory) {
         return _symbol;
     }
     
     /**
      * @notice Returns how many decimal places the token uses.
      */
-    function decimals() public pure returns (uint8) {
+    function decimals() external pure returns (uint8) {
         return _decimals;
     }
     
@@ -1032,7 +1032,7 @@ contract NTE is IERC20 {
      * @notice Checks if the contract is currently in a paused state.
      * @return True if the contract is paused, otherwise false.
      */
-    function paused() public view returns (bool) {
+    function paused() external view returns (bool) {
         return _paused;
     }
     
@@ -1040,7 +1040,7 @@ contract NTE is IERC20 {
      * @notice Returns the address of the current contract owner.
      * @return The address of the owner.
      */
-    function owner() public view returns (address) {
+    function owner() external view returns (address) {
         return _owner;
     }
     
@@ -1048,7 +1048,7 @@ contract NTE is IERC20 {
      * @notice Returns the URL pointing to the token's official logo.
      * @return The logo metadata URL string.
      */
-    function tokenURI() public pure returns (string memory) {
+    function tokenURI() external pure returns (string memory) {
         return _tokenLogo;
     }
     
@@ -1057,7 +1057,7 @@ contract NTE is IERC20 {
      * @param account The address to check.
      * @return The current nonce.
      */
-    function getCategorizedNonce(address account) public view returns (uint256) {
+    function getCategorizedNonce(address account) external view returns (uint256) {
         return userCategorizedNonce[account];
     }
 
@@ -1081,7 +1081,7 @@ contract NTE is IERC20 {
      * @return description A brief project description.
      * @return website The official project website URL.
      */
-    function getTokenInfo() public view returns (
+    function getTokenInfo() external view returns (
         string memory tokenName,
         string memory tokenSymbol,
         uint8 tokenDecimals,
@@ -1102,7 +1102,7 @@ contract NTE is IERC20 {
      * @return routerExempt Indicates if the main DEX router is exempt from taxes.
      * @return pairExempt Indicates if the main DEX pair is exempt from taxes.
      */
-    function getTaxConfiguration() public view returns (
+    function getTaxConfiguration() external view returns (
         uint256 buyTax,
         uint256 sellTax,
         uint256 transferTax,
@@ -1148,7 +1148,7 @@ contract NTE is IERC20 {
      * @dev Only possible 30 days after launch for security.
      * Cannot renounce while contract is paused to prevent permanent lock.
      */
-    function renounceOwnership() public onlyOwner {
+    function renounceOwnership() external onlyOwner {
         if (_paused) revert SYS_DISABLED();
         if (block.timestamp <= launchTime + OWNERSHIP_LOCK_PERIOD) revert AUTH_LOCKED();
         address previousOwner = _owner;
@@ -1709,7 +1709,7 @@ contract NTE is IERC20 {
      * @param addedValue How many extra tokens they can spend.
      * @return True if it worked.
      */
-    function increaseAllowance(address spender, uint256 addedValue) public returns (bool) {
+    function increaseAllowance(address spender, uint256 addedValue) external returns (bool) {
         uint256 currentAllowance = allowance(msg.sender, spender);
         if (currentAllowance + addedValue < currentAllowance) revert APRV_OVERFLOW();
         _approve(msg.sender, spender, currentAllowance + addedValue);
@@ -1753,7 +1753,7 @@ contract NTE is IERC20 {
      * @param subtractedValue How many tokens to take away from their allowance.
      * @return True if it worked.
      */
-    function decreaseAllowance(address spender, uint256 subtractedValue) public returns (bool) {
+    function decreaseAllowance(address spender, uint256 subtractedValue) external returns (bool) {
         uint256 currentAllowance = allowance(msg.sender, spender);
         if (currentAllowance < subtractedValue) revert APRV_UNDERFLOW();
         _approve(msg.sender, spender, currentAllowance - subtractedValue);
