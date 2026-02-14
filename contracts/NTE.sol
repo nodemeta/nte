@@ -266,9 +266,9 @@ contract NTE is IERC20 {
     address public liquidityCollector;
     
     /// @notice The PancakeSwap router we talk to
-    address public pancakeRouter;
+    address public immutable pancakeRouter;
     /// @notice Our main trading pool (NTE/WETH)
-    address public pancakePair;
+    address public immutable pancakePair;
     /// @notice A list of addresses we treat as DEX pools
     mapping(address => bool) public isPancakePair;
     
@@ -276,11 +276,11 @@ contract NTE is IERC20 {
     uint256 public totalBurned;
     
     /// @notice Whether our anti-bot shields are currently up
-    bool public antiBotEnabled;
+    bool public constant antiBotEnabled = true;
     /// @notice When the contract was first deployed
-    uint256 public launchTime;
+    uint256 public immutable launchTime;
     /// @notice How long the anti-bot protection lasts after launch
-    uint256 public antiBotDuration;
+    uint256 public constant antiBotDuration = 3900;
     
     // ===================================================
     // SMART CATEGORIES - Organized Payments
@@ -714,8 +714,6 @@ contract NTE is IERC20 {
         maxBlocksForMevProtection = 2;
         minTimeBetweenTxs = 12;
         
-        antiBotEnabled = true;
-        antiBotDuration = 3900;
         launchTime = block.timestamp;
         
         maxTxPerWindow = 10;
