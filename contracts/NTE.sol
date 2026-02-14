@@ -270,9 +270,9 @@ contract NTE is IERC20 {
     address public liquidityCollector;
     
     /// @notice The PancakeSwap router we talk to
-    address public immutable pancakeRouter;
+    address public pancakeRouter;
     /// @notice Our main trading pool (NTE/WETH)
-    address public immutable pancakePair;
+    address public pancakePair;
     /// @notice A list of addresses we treat as DEX pools
     mapping(address => bool) public isPancakePair;
     
@@ -549,6 +549,10 @@ contract NTE is IERC20 {
     event EmergencyBNBWithdraw(address indexed to, uint256 amount);
     /// @notice Emitted when the staking contract address is updated
     event StakingContractUpdated(address indexed newStakingContract);
+    /// @notice Emitted when the PancakeSwap router is updated
+    event PancakeRouterUpdated(address indexed newRouter);
+    /// @notice Emitted when the primary PancakeSwap pair is updated
+    event PancakePairUpdated(address indexed newPair);
     /// @notice Emitted when tokens are locked for staking
     event TokensLockedForStaking(address indexed user, uint256 amount);
     /// @notice Emitted when tokens are unlocked from staking
@@ -1622,6 +1626,76 @@ contract NTE is IERC20 {
         if (pair == pancakePair && !status) revert DEX_PAIR_CHECK();
         isPancakePair[pair] = status;
         emit DexPairUpdated(pair, status);
+    }
+
+    /**
+     * @notice Sets the PancakeSwap router address and optionally initializes the liquidity pair.
+     * @dev Validates the router contract and optionally creates/retrieves the NTE/WBNB pair.
+     *      This function provides a recovery mechanism if the router wasn't set during deployment.
+     * @param _pancakeRouter The PancakeSwap router address.
+     * @param initializePair Whether to automatically initialize the pancakePair.
+     */
+    function setPancakeRouter(address _pancakeRouter, bool initializePair) external onlyOwner {
+        if (_pancakeRouter == address(0)) revert ADDR_ZERO();
+        if (!_isContract(_pancakeRouter)) revert DEX_ROUTER();
+        
+        if (initializePair) {
+            try IPancakeRouter(_pancakeRouter).factory() returns (address factory) {
+                if (factory == address(0)) revert DEX_FACTORY_ZERO();
+                if (!_isContract(factory)) revert DEX_FACTORY();
+                
+                try IPancakeRouter(_pancakeRouter).WETH() returns (address weth) {
+                    if (weth == address(0)) revert DEX_WETH_ZERO();
+                    if (!_isContract(weth)) revert DEX_WETH();
+                    
+                    try IPancakeFactory(factory).getPair(address(this), weth) returns (address existingPair) {
+                        if (existingPair != address(0)) {
+                            pancakePair = existingPair;
+                            isPancakePair[pancakePair] = true;
+                            emit PancakePairUpdated(pancakePair);
+                        } else {
+                            address newPair = IPancakeFactory(factory).createPair(address(this), weth);
+                            if (newPair == address(0)) revert DEX_PAIR_ZERO();
+                            pancakePair = newPair;
+                            isPancakePair[pancakePair] = true;
+                            emit PancakePairUpdated(pancakePair);
+                        }
+                        
+                        if (pancakePair == address(0)) revert DEX_PAIR_FAIL();
+                    } catch {
+                        revert DEX_PAIR_CHECK();
+                    }
+                } catch {
+                    revert DEX_WETH_CALL();
+                }
+            } catch {
+                revert DEX_FACTORY_CALL();
+            }
+        }
+        
+        pancakeRouter = _pancakeRouter;
+        emit PancakeRouterUpdated(_pancakeRouter);
+    }
+
+    /**
+     * @notice Directly sets the primary PancakeSwap pair address.
+     * @dev Use this to manually configure the pair if automatic initialization fails
+     *      or if you need to update to a different pair. The pair is automatically
+     *      registered in the isPancakePair mapping.
+     * @param _pancakePair The liquidity pair address.
+     */
+    function setPancakePair(address _pancakePair) external onlyOwner {
+        if (_pancakePair == address(0)) revert ADDR_ZERO();
+        if (!_isContract(_pancakePair)) revert DEX_PAIR_NOT_CONTRACT();
+        
+        // Unregister old pair if it exists
+        if (pancakePair != address(0)) {
+            isPancakePair[pancakePair] = false;
+        }
+        
+        pancakePair = _pancakePair;
+        isPancakePair[_pancakePair] = true;
+        emit PancakePairUpdated(_pancakePair);
     }
 
     /**
