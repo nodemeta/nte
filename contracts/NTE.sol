@@ -1857,7 +1857,7 @@ contract NTE is IERC20 {
         ) {
             _transfer(from, to, amount);
         } else {
-            uint256 tax = _calculateTax(from, to, amount);
+            uint256 tax = _calculateTax(from, to, amount, msg.sender);
             
             if (tax > 0) {
                 if (treasury == address(0)) revert TAX_TREASURY_ZERO();
@@ -1898,20 +1898,29 @@ contract NTE is IERC20 {
     /**
      * @dev Deciding which tax rate applies to this specific trade.
      *      We check if it's a Buy, a Sell, or just a friend-to-friend (P2P) move.
+     *      Liquidity operations orchestrated by the router are excluded from buy/sell taxes.
      * @param from Sender address.
      * @param to Recipient address.
      * @param amount Base amount.
+     * @param initiator The address initiating the transfer (msg.sender).
      * @return The amount of tokens to take as tax.
      */
-    function _calculateTax(address from, address to, uint256 amount) private view returns (uint256) {
+    function _calculateTax(address from, address to, uint256 amount, address initiator) private view returns (uint256) {
         uint256 taxBps = 0;
         
+        // If router is the initiator, it's a liquidity operation (add/remove), not a swap
+        bool isLiquidityOp = (initiator == pancakeRouter);
+        
         if (isPancakePair[from] && !isPancakePair[to]) {
-            // Buy: from DEX to user
-            taxBps = buyTaxBps;
+            // Buy: from DEX to user (but not during router-orchestrated liquidity removal)
+            if (!isLiquidityOp) {
+                taxBps = buyTaxBps;
+            }
         } else if (!isPancakePair[from] && isPancakePair[to]) {
-            // Sell: from user to DEX
-            taxBps = sellTaxBps;
+            // Sell: from user to DEX (but not during router-orchestrated liquidity addition)
+            if (!isLiquidityOp) {
+                taxBps = sellTaxBps;
+            }
         } else if (isPancakePair[from] && isPancakePair[to]) {
             // Pool-to-pool move (usually arbitrage)
             taxBps = sellTaxBps;
