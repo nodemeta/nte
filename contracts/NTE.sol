@@ -99,7 +99,7 @@ pragma solidity 0.8.28;
  * │ CATEGORIES & STRINGS [CAT_*, STR_*]                                     │
  * └─────────────────────────────────────────────────────────────────────────┘
  * CAT_INVALID      This category doesn't exist   CAT_DISABLED       Category is turned off
- * CAT_NAME_INVALID Invalid category name         STR_TOO_LONG       String exceeds max length
+ * STR_TOO_LONG       String exceeds max length
  * STR_EMPTY        String cannot be empty
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
@@ -253,14 +253,14 @@ contract NTE is IERC20 {
     mapping(address => bool) public isAuthSigner;
     
     /// @notice The wallet where all collected taxes are sent
-    address public treasury;
+    address private treasury;
     
     /// @notice Tax taken when buying (in basis points: 100 = 1%)
-    uint256 public buyTaxBps;
+    uint256 private buyTaxBps;
     /// @notice Tax taken when selling
-    uint256 public sellTaxBps;
+    uint256 private sellTaxBps;
     /// @notice Tax taken for standard wallet-to-wallet transfers
-    uint256 public transferTaxBps;
+    uint256 private transferTaxBps;
     
     /// @notice Whether a portion of tax is routed to a liquidity manager
     bool public autoLiquidityEnabled;
@@ -280,11 +280,11 @@ contract NTE is IERC20 {
     uint256 public totalBurned;
     
     /// @notice Whether our anti-bot shields are currently up
-    bool public constant antiBotEnabled = true;
+    bool private constant antiBotEnabled = true;
     /// @notice When the contract was first deployed
     uint256 public immutable launchTime;
     /// @notice How long the anti-bot protection lasts after launch
-    uint256 public constant antiBotDuration = 3900;
+    uint256 private constant antiBotDuration = 3900;
     
     // ===================================================
     // SMART CATEGORIES - Organized Payments
@@ -313,7 +313,7 @@ contract NTE is IERC20 {
     /// @notice A list of the most recent categorized transfers
     CategorizedTransaction[] private recentCategorizedTxs;
     /// @notice We only keep the last 100 categorized trades in memory
-    uint256 public constant MAX_STORED_TXS = 100;
+    uint256 private constant MAX_STORED_TXS = 100;
     /// @notice Internal tracker for the rolling transaction list
     uint256 private _categorizedTxCounter;
     
@@ -376,14 +376,14 @@ contract NTE is IERC20 {
     /// @notice Maximum price movement allowed in a single trade
     uint256 public maxPriceImpactPercent;
     /// @notice People who are allowed to move the price as much as they want
-    mapping(address => bool) public priceImpactExempt;
+    mapping(address => bool) internal priceImpactExempt;
     
     /// @notice Whether we're forcing a wait time between every trade
     bool public walletCooldownEnabled;
     /// @notice The mandatory wait time between trades (in seconds)
     uint256 public globalCooldownSeconds;
     /// @notice When a wallet last made a trade
-    mapping(address => uint256) public lastTradeTime;
+    mapping(address => uint256) internal lastTradeTime;
     
     /// @notice Internal guard to prevent "re-entry" attacks
     bool private _entered;
@@ -429,29 +429,29 @@ contract NTE is IERC20 {
     
     
     /// @notice Whether our "MEV Shield" is active against bots
-    bool public mevProtectionEnabled;
+    bool private mevProtectionEnabled;
     /// @notice How many blocks apart trades must be
-    uint256 public maxBlocksForMevProtection;
+    uint256 private maxBlocksForMevProtection;
     /// @notice Keeping track of which block a wallet last traded in
-    mapping(address => uint256) public lastBlockNumber;
+    mapping(address => uint256) internal lastBlockNumber;
     /// @notice People who are allowed to bypass MEV checks
-    mapping(address => bool) public mevProtectionExempt;
+    mapping(address => bool) internal mevProtectionExempt;
     /// @notice Minimum time (in seconds) between trades
-    uint256 public minTimeBetweenTxs;
+    uint256 private minTimeBetweenTxs;
     
     // ===================================================
     // VELOCITY CONTROL - Slowing Down the Pace
     // ===================================================
     
     /// @notice Whether we're limiting how many trades you can do in a row
-    bool public velocityLimitEnabled;
+    bool private velocityLimitEnabled;
     /// @notice The "speed limit" for transactions
-    uint256 public maxTxPerWindow;
+    uint256 private maxTxPerWindow;
     /// @notice The time window (in seconds) for the speed limit
-    uint256 public velocityTimeWindow;
+    uint256 private velocityTimeWindow;
     
     /// @notice Max number of trades we track for the speed limit
-    uint256 public constant MAX_VELOCITY_BUFFER = 10;
+    uint256 private constant MAX_VELOCITY_BUFFER = 10;
     /// @notice Internal counter for your "speed limit" tracker
     mapping(address => uint256) private userVelocityIndex;
     /// @notice A list of your most recent trade timestamps
@@ -461,7 +461,7 @@ contract NTE is IERC20 {
     /**
      * @notice People who don't have a "speed limit" on their trades.
      */
-    mapping(address => bool) public velocityLimitExempt;
+    mapping(address => bool) internal velocityLimitExempt;
 
     /// @notice The staking contract allowed to lock balances
     address public stakingContract;
@@ -518,7 +518,8 @@ contract NTE is IERC20 {
     /// @notice Emitted specifically when MEV protection is toggled on/off
     event MevProtectionToggled(bool enabled);
     /// @notice Emitted when a transaction is blocked by protection logic
-    event MevAttackPrevented(address indexed account, uint256 blockNumber, string reason);
+    /// @dev reason codes: 1=CONTRACT_SELL, 2=FRESH_WALLET_SELL, 3=NEW_WALLET_RAPID_SELL, 4=MEV_BLOCK, 5=MEV_TIME
+    event MevAttackPrevented(address indexed account, uint256 blockNumber, uint8 reason);
     /// @notice Emitted when protection exemption for an address changes
     event MevProtectionExemptUpdated(address indexed account, bool exempt);
     
@@ -646,7 +647,6 @@ contract NTE is IERC20 {
     error PRICE_TOO_HIGH();
     error CAT_INVALID();
     error CAT_DISABLED();
-    error CAT_NAME_INVALID();
     error STR_TOO_LONG();
     error STR_EMPTY();
     error EMG_INVALID_TOKEN();
@@ -702,38 +702,9 @@ contract NTE is IERC20 {
         
         if (_pancakeRouter != address(0)) {
             if (!_isContract(_pancakeRouter)) revert DEX_ROUTER();
-            
-            try IPancakeRouter(_pancakeRouter).factory() returns (address factory) {
-                if (factory == address(0)) revert DEX_FACTORY_ZERO();
-                if (!_isContract(factory)) revert DEX_FACTORY();
-                
-                try IPancakeRouter(_pancakeRouter).WETH() returns (address weth) {
-                    if (weth == address(0)) revert DEX_WETH_ZERO();
-                    if (!_isContract(weth)) revert DEX_WETH();
-                    
-                    try IPancakeFactory(factory).getPair(address(this), weth) returns (address existingPair) {
-                        if (existingPair != address(0)) {
-                            pancakePair = existingPair;
-                            isPancakePair[pancakePair] = true;
-                        } else {
-                            address newPair = IPancakeFactory(factory).createPair(address(this), weth);
-                            if (newPair == address(0)) revert DEX_PAIR_ZERO();
-                            pancakePair = newPair;
-                            isPancakePair[pancakePair] = true;
-                        }
-                        
-                        if (pancakePair == address(0)) revert DEX_PAIR_FAIL();
-                        pancakeRouter = _pancakeRouter;
-                        // Router is NOT tax exempt to prevent arbitrage through direct router calls
-                    } catch {
-                        revert DEX_PAIR_CHECK();
-                    }
-                } catch {
-                    revert DEX_WETH_CALL();
-                }
-            } catch {
-                revert DEX_FACTORY_CALL();
-            }
+            _initializeDexPair(_pancakeRouter);
+            pancakeRouter = _pancakeRouter;
+            // Router is NOT tax exempt to prevent arbitrage through direct router calls
         }
         
         maxSellPercentage = 100;
@@ -1056,55 +1027,7 @@ contract NTE is IERC20 {
         return _owner;
     }
     
-    /**
-     * @notice Returns the URL pointing to the token's official logo.
-     * @return The logo metadata URL string.
-     */
-    function tokenURI() external pure returns (string memory) {
-        return _tokenLogo;
-    }
-    
-    /**
-     * @notice Returns the nonce for categorized transfers for an account.
-     * @param account The address to check.
-     * @return The current nonce.
-     */
-    function getCategorizedNonce(address account) external view returns (uint256) {
-        return userCategorizedNonce[account];
-    }
 
-    /**
-     * @notice Returns how many of an account's tokens are currently locked for staking.
-     * @dev This mirrors the internal lockedForStaking mapping for easier frontend access.
-     * @param account The address to check.
-     * @return The amount of tokens locked for staking.
-     */
-    function stakedBalanceOf(address account) external view returns (uint256) {
-        return lockedForStaking[account];
-    }
-    
-    /**
-     * @notice Returns a comprehensive summary of token metadata.
-     * @return tokenName The full name of the token.
-     * @return tokenSymbol The ticker symbol of the token.
-     * @return tokenDecimals The number of decimal places used.
-     * @return tokenTotalSupply The current total circulating supply.
-     * @return logo The token's logo URI.
-     * @return description A brief project description.
-     * @return website The official project website URL.
-     */
-    function getTokenInfo() external view returns (
-        string memory tokenName,
-        string memory tokenSymbol,
-        uint8 tokenDecimals,
-        uint256 tokenTotalSupply,
-        string memory logo,
-        string memory description,
-        string memory website
-    ) {
-        return (_name, _symbol, _decimals, _totalSupply, _tokenLogo, _description, _website);
-    }
-    
     /**
      * @notice Returns the current tax configuration settings.
      * @return buyTax The tax rate applied to buy transactions (in basis points).
@@ -1640,37 +1563,8 @@ contract NTE is IERC20 {
         if (!_isContract(_pancakeRouter)) revert DEX_ROUTER();
         
         if (initializePair) {
-            try IPancakeRouter(_pancakeRouter).factory() returns (address factory) {
-                if (factory == address(0)) revert DEX_FACTORY_ZERO();
-                if (!_isContract(factory)) revert DEX_FACTORY();
-                
-                try IPancakeRouter(_pancakeRouter).WETH() returns (address weth) {
-                    if (weth == address(0)) revert DEX_WETH_ZERO();
-                    if (!_isContract(weth)) revert DEX_WETH();
-                    
-                    try IPancakeFactory(factory).getPair(address(this), weth) returns (address existingPair) {
-                        if (existingPair != address(0)) {
-                            pancakePair = existingPair;
-                            isPancakePair[pancakePair] = true;
-                            emit PancakePairUpdated(pancakePair);
-                        } else {
-                            address newPair = IPancakeFactory(factory).createPair(address(this), weth);
-                            if (newPair == address(0)) revert DEX_PAIR_ZERO();
-                            pancakePair = newPair;
-                            isPancakePair[pancakePair] = true;
-                            emit PancakePairUpdated(pancakePair);
-                        }
-                        
-                        if (pancakePair == address(0)) revert DEX_PAIR_FAIL();
-                    } catch {
-                        revert DEX_PAIR_CHECK();
-                    }
-                } catch {
-                    revert DEX_WETH_CALL();
-                }
-            } catch {
-                revert DEX_FACTORY_CALL();
-            }
+            _initializeDexPair(_pancakeRouter);
+            emit PancakePairUpdated(pancakePair);
         }
         
         pancakeRouter = _pancakeRouter;
@@ -1959,19 +1853,19 @@ contract NTE is IERC20 {
             
             // Contracts can't sell directly to the pool (stops flash loan attacks)
             if (isSellToPair && isFromContract && from != address(this)) {
-                emit MevAttackPrevented(from, block.number, "CONTRACT_SELL");
+                emit MevAttackPrevented(from, block.number, 1);
                 revert MEV_VELOCITY();
             }
             
             // If it's a sell, we check if the wallet is brand new
             if (isSellToPair) {
                 if (lastBlockNumber[from] == 0) {
-                    emit MevAttackPrevented(from, block.number, "FRESH_WALLET_SELL");
+                    emit MevAttackPrevented(from, block.number, 2);
                     revert MEV_VELOCITY();
                 }
                 // Even if not brand new, you can't sell if you just bought 60 seconds ago
                 if (lastTradeTime[from] != 0 && block.timestamp - lastTradeTime[from] < MIN_HOLD_BEFORE_SELL) {
-                    emit MevAttackPrevented(from, block.number, "NEW_WALLET_RAPID_SELL");
+                    emit MevAttackPrevented(from, block.number, 3);
                     revert MEV_VELOCITY();
                 }
             }
@@ -1980,13 +1874,13 @@ contract NTE is IERC20 {
             if (lastBlockNumber[from] != 0) {
                 if (block.number > lastBlockNumber[from]) {
                     if ((block.number - lastBlockNumber[from]) <= maxBlocksForMevProtection) {
-                        emit MevAttackPrevented(from, block.number, "MEV_BLOCK");
+                        emit MevAttackPrevented(from, block.number, 4);
                         revert MEV_VELOCITY();
                     }
                 }
                 
                 if ((block.timestamp - lastTradeTime[from]) < minTimeBetweenTxs) {
-                    emit MevAttackPrevented(from, block.number, "MEV_TIME");
+                    emit MevAttackPrevented(from, block.number, 5);
                     revert MEV_TOO_FAST();
                 }
             }
@@ -2187,6 +2081,43 @@ contract NTE is IERC20 {
         if (recovered == address(0)) return address(0);
         
         return recovered;
+    }
+
+    /**
+     * @dev Shared helper that resolves factory + WETH from a router, then
+     *      gets or creates the NTE/WBNB pair. Sets `pancakePair` and
+     *      `isPancakePair` as side-effects. Callers are responsible for
+     *      setting `pancakeRouter` and emitting any events.
+     * @param _router A validated (non-zero, contract) router address.
+     */
+    function _initializeDexPair(address _router) internal {
+        try IPancakeRouter(_router).factory() returns (address factory) {
+            if (factory == address(0)) revert DEX_FACTORY_ZERO();
+            if (!_isContract(factory)) revert DEX_FACTORY();
+
+            try IPancakeRouter(_router).WETH() returns (address weth) {
+                if (weth == address(0)) revert DEX_WETH_ZERO();
+                if (!_isContract(weth)) revert DEX_WETH();
+
+                try IPancakeFactory(factory).getPair(address(this), weth) returns (address existingPair) {
+                    if (existingPair != address(0)) {
+                        pancakePair = existingPair;
+                    } else {
+                        address newPair = IPancakeFactory(factory).createPair(address(this), weth);
+                        if (newPair == address(0)) revert DEX_PAIR_ZERO();
+                        pancakePair = newPair;
+                    }
+                    isPancakePair[pancakePair] = true;
+                    if (pancakePair == address(0)) revert DEX_PAIR_FAIL();
+                } catch {
+                    revert DEX_PAIR_CHECK();
+                }
+            } catch {
+                revert DEX_WETH_CALL();
+            }
+        } catch {
+            revert DEX_FACTORY_CALL();
+        }
     }
 
     /**
