@@ -14,9 +14,11 @@ contract NTEMigrationHelper {
     address public immutable newToken;
     address public owner;
     address public pendingOwner;
+    uint256 public immutable launchTime;
 
     uint256 public constant MAX_BATCH_SIZE = 100;
     uint256 public constant CLOSE_GRACE_PERIOD = 7 days;
+    uint256 private constant OWNERSHIP_LOCK_PERIOD = 30 days;
 
     mapping(address => bool) public migrated;
     bool public migrationClosed;
@@ -37,6 +39,8 @@ contract NTEMigrationHelper {
     event ClaimDeadlineSet(uint256 deadline);
     event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event EmergencyTokenWithdraw(address indexed token, address indexed to, uint256 amount);
+    event EmergencyBNBWithdraw(address indexed to, uint256 amount);
     event TokenRescued(address indexed token, address indexed to, uint256 amount);
     event NativeRescued(address indexed to, uint256 amount);
     event MigrationInitialized(address indexed oldToken, address indexed newToken, address indexed owner);
@@ -83,6 +87,7 @@ contract NTEMigrationHelper {
         oldToken = _oldToken;
         newToken = _newToken;
         owner = msg.sender;
+        launchTime = block.timestamp;
         
         emit MigrationInitialized(_oldToken, _newToken, msg.sender);
     }
@@ -101,6 +106,22 @@ contract NTEMigrationHelper {
         owner = pendingOwner;
         pendingOwner = address(0);
         emit OwnershipTransferred(oldOwner, owner);
+    }
+
+    /// @notice Cancel a pending ownership transfer.
+    function cancelOwnershipTransfer() external onlyOwner {
+        require(pendingOwner != address(0), "NO_PENDING_TRANSFER");
+        pendingOwner = address(0);
+        emit OwnershipTransferStarted(owner, address(0));
+    }
+
+    /// @notice Renounce ownership after the lock period has elapsed.
+    function renounceOwnership() external onlyOwner {
+        require(block.timestamp > launchTime + OWNERSHIP_LOCK_PERIOD, "OWNER_LOCKED");
+        address oldOwner = owner;
+        owner = address(0);
+        pendingOwner = address(0);
+        emit OwnershipTransferred(oldOwner, address(0));
     }
 
     /// @notice NTE balance held by this contract (available for migration).
@@ -489,24 +510,23 @@ contract NTEMigrationHelper {
     }
 
     /// @notice Pull any ERC20 (including leftover NTE) out of this contract.
-    function rescueToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
-        require(to != address(0), "ZERO_ADDRESS");
+    function emergencyWithdrawToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        _withdrawToken(token, to, amount);
+    }
 
-        IERC20MinimalMigration erc20 = IERC20MinimalMigration(token);
-        require(erc20.transfer(to, amount), "RESCUE_FAILED");
-        
-        emit TokenRescued(token, to, amount);
+    /// @notice Legacy alias for emergency token withdrawals.
+    function rescueToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        _withdrawToken(token, to, amount);
     }
 
     /// @notice Recover native BNB/ETH accidentally sent to this contract.
+    function emergencyWithdrawBNB(address payable to, uint256 amount) external onlyOwner nonReentrant {
+        _withdrawNative(to, amount);
+    }
+
+    /// @notice Legacy alias for emergency native withdrawals.
     function rescueNative(address payable to, uint256 amount) external onlyOwner nonReentrant {
-        require(to != address(0), "ZERO_ADDRESS");
-        require(address(this).balance >= amount, "INSUFFICIENT_NATIVE");
-
-        (bool success, ) = to.call{value: amount}("");
-        require(success, "NATIVE_RESCUE_FAILED");
-
-        emit NativeRescued(to, amount);
+        _withdrawNative(to, amount);
     }
     
     function _isContract(address account) private view returns (bool) {
@@ -515,6 +535,36 @@ contract NTEMigrationHelper {
             size := extcodesize(account)
         }
         return size > 0;
+    }
+
+    function _withdrawToken(address token, address to, uint256 amount) private {
+        require(token != address(0), "INVALID_TOKEN");
+        require(to != address(0), "ZERO_RECIPIENT");
+
+        uint256 contractBalance = IERC20MinimalMigration(token).balanceOf(address(this));
+        require(contractBalance >= amount, "INSUFFICIENT_TOKEN_BALANCE");
+
+        bytes memory payload = abi.encodeWithSelector(IERC20MinimalMigration.transfer.selector, to, amount);
+        (bool success, bytes memory returndata) = token.call(payload);
+        require(success, "TOKEN_TRANSFER_FAIL");
+        if (returndata.length > 0) {
+            require(abi.decode(returndata, (bool)), "TOKEN_TRANSFER_FAIL");
+        }
+
+        emit EmergencyTokenWithdraw(token, to, amount);
+        emit TokenRescued(token, to, amount);
+    }
+
+    function _withdrawNative(address payable to, uint256 amount) private {
+        require(block.timestamp > launchTime + OWNERSHIP_LOCK_PERIOD, "EMG_WAIT_30D");
+        require(to != address(0), "INVALID_RECIPIENT");
+        require(address(this).balance >= amount, "INSUFFICIENT_NATIVE");
+
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "NATIVE_RESCUE_FAILED");
+
+        emit EmergencyBNBWithdraw(to, amount);
+        emit NativeRescued(to, amount);
     }
 
     function _transferAndValidate(address to, uint256 amount) external onlySelf returns (bool) {
@@ -554,39 +604,94 @@ contract NTEMigrationHelper {
             selector := mload(add(reason, 32))
         }
 
-        // must be Error(string) — 0x08c379a0
-        if (selector != 0x08c379a0) {
-            return fallbackReason;
+        // Error(string)
+        if (selector == 0x08c379a0) {
+            // selector + offset + length
+            if (reason.length < 68) {
+                return fallbackReason;
+            }
+
+            uint256 offset;
+            uint256 strLen;
+            assembly {
+                offset := mload(add(reason, 36))
+                strLen := mload(add(reason, 68))
+            }
+
+            if (offset != 32) {
+                return fallbackReason;
+            }
+
+            if (strLen > reason.length - 68) {
+                return fallbackReason;
+            }
+
+            bytes memory strBytes = new bytes(strLen);
+            for (uint256 i = 0; i < strLen;) {
+                strBytes[i] = reason[68 + i];
+                unchecked { ++i; }
+            }
+            return string(strBytes);
         }
 
-        // ABI-encoded string: 4-byte selector + 32-byte offset + 32-byte length = 68 bytes minimum
-        if (reason.length < 68) {
-            return fallbackReason;
+        // Panic(uint256)
+        if (selector == 0x4e487b71) {
+            if (reason.length < 36) {
+                return "PANIC";
+            }
+            uint256 panicCode;
+            assembly {
+                panicCode := mload(add(reason, 36))
+            }
+            return string.concat("PANIC_", _uintToString(panicCode));
         }
 
-        uint256 offset;
-        uint256 strLen;
-        assembly {
-            offset := mload(add(reason, 36))
-            strLen := mload(add(reason, 68))
-        }
+        // Most modern Solidity custom errors land here.
+        return string.concat("CUSTOM_ERROR_", _selectorToHex(selector));
+    }
 
-        if (offset != 32) {
-            return fallbackReason;
-        }
+    function _selectorToHex(bytes4 selector) private pure returns (string memory) {
+        bytes memory out = new bytes(10);
+        out[0] = "0";
+        out[1] = "x";
 
-        // string bytes start at position 68 in the payload
-        if (strLen > reason.length - 68) {
-            return fallbackReason;
-        }
-
-        bytes memory strBytes = new bytes(strLen);
-        for (uint256 i = 0; i < strLen;) {
-            strBytes[i] = reason[68 + i];
+        uint32 value = uint32(selector);
+        for (uint256 i = 0; i < 4;) {
+            uint8 b = uint8(value >> ((3 - i) * 8));
+            out[2 + (i * 2)] = _nibbleToHexChar(b >> 4);
+            out[3 + (i * 2)] = _nibbleToHexChar(b & 0x0f);
             unchecked { ++i; }
         }
 
-        return string(strBytes);
+        return string(out);
+    }
+
+    function _nibbleToHexChar(uint8 nibble) private pure returns (bytes1) {
+        if (nibble < 10) {
+            return bytes1(nibble + 48);
+        }
+        return bytes1(nibble + 87);
+    }
+
+    function _uintToString(uint256 value) private pure returns (string memory) {
+        if (value == 0) {
+            return "0";
+        }
+
+        uint256 temp = value;
+        uint256 digits = 0;
+        while (temp != 0) {
+            digits++;
+            temp /= 10;
+        }
+
+        bytes memory buffer = new bytes(digits);
+        while (value != 0) {
+            digits -= 1;
+            buffer[digits] = bytes1(uint8(48 + (value % 10)));
+            value /= 10;
+        }
+        return string(buffer);
     }
 
     receive() external payable {}

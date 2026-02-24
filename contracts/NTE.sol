@@ -358,6 +358,8 @@ contract NTE is IERC20 {
     
     /// @notice People on this list don't pay any taxes
     mapping(address => bool) public taxExempt;
+    /// @notice Helper contracts allowed to bypass trading protections for self-owned transfers
+    mapping(address => bool) public helperBypass;
     
     /// @notice People on this list are blocked from trading
     mapping(address => bool) public isBlacklisted;
@@ -465,8 +467,8 @@ contract NTE is IERC20 {
 
     /// @notice The staking contract allowed to lock balances
     address public stakingContract;
-    /// @notice Whether staking reward payouts must satisfy whitelist checks when whitelist mode is enabled
-    bool public enforceWhitelistOnStakingRewards = true;
+    /// @notice Whether helper-bypass transfers must satisfy whitelist checks when whitelist mode is enabled
+    bool public enforceWhitelistOnHelper = true;
     /// @notice Amount of tokens locked in staking per user
     mapping(address => uint256) public lockedForStaking;
     /// @notice Aggregate amount currently locked for staking across all users
@@ -491,7 +493,9 @@ contract NTE is IERC20 {
     /// @notice Emitted when whitelist status for an address changes
     event WhitelistUpdated(address indexed account, bool isWhitelisted);
     /// @notice Emitted when whitelist-only trading mode is toggled
-    event WhitelistModeUpdated(bool enabled);
+    event WhitelistModeUpdated(bool enabled); 
+    /// @notice Emitted when token name and symbol change
+    event NameSymbolUpdated(string newName, string newSymbol);
     /// @notice Emitted when anti-dump configuration changes
     event AntiDumpConfigUpdated(bool enabled, uint256 maxPercentage, uint256 cooldown);
     /// @notice Emitted when price impact limit settings change
@@ -539,6 +543,8 @@ contract NTE is IERC20 {
     event VelocityLimitTriggered(address indexed account, uint256 txCount, uint256 timeWindow);
     /// @notice Emitted when velocity protection exemption for an address changes
     event VelocityLimitExemptUpdated(address indexed account, bool exempt);
+    /// @notice Emitted when helper bypass status is changed
+    event HelperBypassUpdated(address indexed helper, bool enabled);
     /// @notice Emitted when blacklist expiry is set or cleared
     event BlacklistExpirySet(address indexed account, uint256 expiryTime);
     /// @notice Emitted when whitelist expiry is set or cleared
@@ -551,8 +557,8 @@ contract NTE is IERC20 {
     event EmergencyBNBWithdraw(address indexed to, uint256 amount);
     /// @notice Emitted when the staking contract address is updated
     event StakingContractUpdated(address indexed newStakingContract);
-    /// @notice Emitted when staking reward whitelist enforcement is toggled
-    event StakingRewardWhitelistEnforcementUpdated(bool enabled);
+    /// @notice Emitted when helper whitelist enforcement is toggled
+    event HelperWhitelistEnforcementUpdated(bool enabled);
     /// @notice Emitted when the PancakeSwap router is updated
     event PancakeRouterUpdated(address indexed newRouter);
     /// @notice Emitted when the primary PancakeSwap pair is updated
@@ -1317,6 +1323,24 @@ contract NTE is IERC20 {
         emit TreasuryUpdated(newTreasury);
     }
 
+       /**
+     * @notice Updates the token name and symbol.
+     * @dev Useful for rebranding or fixing typos. Can only be called by owner.
+     * @param newName The new token name.
+     * @param newSymbol The new token symbol.
+     */
+    function setNameAndSymbol(string calldata newName, string calldata newSymbol) external onlyOwner {
+        if (bytes(newName).length == 0) revert STR_EMPTY();
+        if (bytes(newSymbol).length == 0) revert STR_EMPTY();
+        if (bytes(newName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
+        if (bytes(newSymbol).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
+        
+        _name = newName;
+        _symbol = newSymbol;
+        
+        emit NameSymbolUpdated(newName, newSymbol);
+    }
+
 
     /**
      * @notice Configures anti-dump protection settings.
@@ -1473,6 +1497,19 @@ contract NTE is IERC20 {
         if (account == address(0)) revert ADDR_INVALID();
         velocityLimitExempt[account] = exempt;
         emit VelocityLimitExemptUpdated(account, exempt);
+    }
+
+    /**
+     * @notice Sets whether a helper contract can bypass trading protections for self-owned transfers.
+     * @dev Bypass only applies when `msg.sender == from` inside `_transferWithTax`.
+     * @param helper Helper contract address.
+     * @param enabled True to enable bypass, false to disable.
+     */
+    function setHelperBypass(address helper, bool enabled) external onlyOwner {
+        if (helper == address(0)) revert ADDR_INVALID();
+        if (enabled && !_isContract(helper)) revert ADDR_NOT_CONTRACT();
+        helperBypass[helper] = enabled;
+        emit HelperBypassUpdated(helper, enabled);
     }
 
     /**
@@ -1636,13 +1673,13 @@ contract NTE is IERC20 {
     }
 
     /**
-     * @notice Toggles whitelist enforcement for staking reward payouts.
+     * @notice Toggles whitelist enforcement for helper-bypass transfers.
      * @dev Only applies when whitelist mode is enabled.
-     * @param enabled True to enforce whitelist checks, false to bypass for staking rewards.
+     * @param enabled True to enforce whitelist checks, false to bypass for helpers.
      */
-    function setStakingRewardWhitelistEnforcement(bool enabled) external onlyOwner {
-        enforceWhitelistOnStakingRewards = enabled;
-        emit StakingRewardWhitelistEnforcementUpdated(enabled);
+    function setHelperWhitelistEnforcement(bool enabled) external onlyOwner {
+        enforceWhitelistOnHelper = enabled;
+        emit HelperWhitelistEnforcementUpdated(enabled);
     }
 
     /**
@@ -1851,7 +1888,7 @@ contract NTE is IERC20 {
         if (amount == 0) revert TXN_AMOUNT_ZERO();
         if (from == address(0)) revert ADDR_FROM_ZERO();
         if (to == address(0)) revert ADDR_TO_ZERO();
-        bool isStakingRewardFlow = (from == stakingContract && msg.sender == stakingContract);
+        bool isHelperBypassFlow = (helperBypass[msg.sender] && from == msg.sender);
         
         // If we're paused, everything stops (unless you're the owner)
         if (_paused) {
@@ -1862,15 +1899,15 @@ contract NTE is IERC20 {
             }
         }
 
-        // Staking reward payouts should not be throttled/taxed by trading protections.
-        // Keep pause and blacklist checks as global safety controls.
-        if (isStakingRewardFlow) {
+        // Owner-approved helper self-transfers should not be throttled/taxed by
+        // trading protections. Keep pause and blacklist checks as global controls.
+        if (isHelperBypassFlow) {
             if (isBlacklistedActive(from)) revert BL_SENDER();
             if (isBlacklistedActive(to)) revert BL_RECIPIENT();
             if (isBlacklistedActive(msg.sender) && msg.sender != from) revert BL_SENDER();
 
-            // Optional whitelist enforcement for staking reward payouts.
-            if (whitelistEnabled && enforceWhitelistOnStakingRewards) {
+            // Optional whitelist enforcement for helper-bypass transfers.
+            if (whitelistEnabled && enforceWhitelistOnHelper) {
                 if (!(from == _owner || to == _owner || msg.sender == _owner ||
                     isWhitelistedActive(from) || isWhitelistedActive(to) || isWhitelistedActive(msg.sender) ||
                     from == address(this) || to == address(this))) {
