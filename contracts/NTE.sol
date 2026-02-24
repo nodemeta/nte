@@ -408,7 +408,7 @@ contract NTE is IERC20 {
     /// @notice Maximum allowed change in tax rate per update (2.5%)
     uint256 private constant MAX_TAX_CHANGE_DELTA = 250;
     /// @notice Maximum anti-dump percentage (100%)
-    uint256 private constant MAX_ANTI_DUMP_PERCENT = 100;
+    uint256 private constant MAX_ANTI_DUMP_PERCENT = 10000;
     /// @notice Minimum price impact threshold in basis points (0.1%)
     uint256 private constant MIN_PRICE_IMPACT_BPS = 10;
     /// @notice Maximum MEV protection block difference
