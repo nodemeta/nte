@@ -488,8 +488,6 @@ contract NTE is IERC20 {
     event WhitelistUpdated(address indexed account, bool isWhitelisted);
     /// @notice Emitted when whitelist-only trading mode is toggled
     event WhitelistModeUpdated(bool enabled);
-    /// @notice Emitted when token name and symbol change
-    event NameSymbolUpdated(string newName, string newSymbol);
     /// @notice Emitted when anti-dump configuration changes
     event AntiDumpConfigUpdated(bool enabled, uint256 maxPercentage, uint256 cooldown);
     /// @notice Emitted when price impact limit settings change
@@ -518,8 +516,7 @@ contract NTE is IERC20 {
     /// @notice Emitted specifically when MEV protection is toggled on/off
     event MevProtectionToggled(bool enabled);
     /// @notice Emitted when a transaction is blocked by protection logic
-    /// @dev reason codes: 1=CONTRACT_SELL, 2=FRESH_WALLET_SELL, 3=NEW_WALLET_RAPID_SELL, 4=MEV_BLOCK, 5=MEV_TIME
-    event MevAttackPrevented(address indexed account, uint256 blockNumber, uint8 reason);
+    event MevAttackPrevented(address indexed account, uint256 blockNumber, string reason);
     /// @notice Emitted when protection exemption for an address changes
     event MevProtectionExemptUpdated(address indexed account, bool exempt);
     
@@ -1288,23 +1285,6 @@ contract NTE is IERC20 {
         emit TreasuryUpdated(newTreasury);
     }
 
-    /**
-     * @notice Updates the token name and symbol.
-     * @dev Useful for rebranding or fixing typos. Can only be called by owner.
-     * @param newName The new token name.
-     * @param newSymbol The new token symbol.
-     */
-    function setNameAndSymbol(string calldata newName, string calldata newSymbol) external onlyOwner {
-        if (bytes(newName).length == 0) revert STR_EMPTY();
-        if (bytes(newSymbol).length == 0) revert STR_EMPTY();
-        if (bytes(newName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
-        if (bytes(newSymbol).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
-        
-        _name = newName;
-        _symbol = newSymbol;
-        
-        emit NameSymbolUpdated(newName, newSymbol);
-    }
 
     /**
      * @notice Configures anti-dump protection settings.
@@ -1553,19 +1533,13 @@ contract NTE is IERC20 {
 
     /**
      * @notice Sets the PancakeSwap router address and optionally initializes the liquidity pair.
-     * @dev Validates the router contract and optionally creates/retrieves the NTE/WBNB pair.
+     * @dev Validates the router contract and updates the stored router address.
      *      This function provides a recovery mechanism if the router wasn't set during deployment.
      * @param _pancakeRouter The PancakeSwap router address.
-     * @param initializePair Whether to automatically initialize the pancakePair.
      */
-    function setPancakeRouter(address _pancakeRouter, bool initializePair) external onlyOwner {
+    function setPancakeRouter(address _pancakeRouter) external onlyOwner {
         if (_pancakeRouter == address(0)) revert ADDR_ZERO();
         if (!_isContract(_pancakeRouter)) revert DEX_ROUTER();
-        
-        if (initializePair) {
-            _initializeDexPair(_pancakeRouter);
-            emit PancakePairUpdated(pancakePair);
-        }
         
         pancakeRouter = _pancakeRouter;
         emit PancakeRouterUpdated(_pancakeRouter);
@@ -1853,19 +1827,19 @@ contract NTE is IERC20 {
             
             // Contracts can't sell directly to the pool (stops flash loan attacks)
             if (isSellToPair && isFromContract && from != address(this)) {
-                emit MevAttackPrevented(from, block.number, 1);
+                emit MevAttackPrevented(from, block.number, "Contract selling to pair");
                 revert MEV_VELOCITY();
             }
             
             // If it's a sell, we check if the wallet is brand new
             if (isSellToPair) {
                 if (lastBlockNumber[from] == 0) {
-                    emit MevAttackPrevented(from, block.number, 2);
+                    emit MevAttackPrevented(from, block.number, "Brand new wallet");
                     revert MEV_VELOCITY();
                 }
                 // Even if not brand new, you can't sell if you just bought 60 seconds ago
                 if (lastTradeTime[from] != 0 && block.timestamp - lastTradeTime[from] < MIN_HOLD_BEFORE_SELL) {
-                    emit MevAttackPrevented(from, block.number, 3);
+                    emit MevAttackPrevented(from, block.number, "Too soon after buy");
                     revert MEV_VELOCITY();
                 }
             }
@@ -1874,13 +1848,13 @@ contract NTE is IERC20 {
             if (lastBlockNumber[from] != 0) {
                 if (block.number > lastBlockNumber[from]) {
                     if ((block.number - lastBlockNumber[from]) <= maxBlocksForMevProtection) {
-                        emit MevAttackPrevented(from, block.number, 4);
+                        emit MevAttackPrevented(from, block.number, "Too soon");
                         revert MEV_VELOCITY();
                     }
                 }
                 
                 if ((block.timestamp - lastTradeTime[from]) < minTimeBetweenTxs) {
-                    emit MevAttackPrevented(from, block.number, 5);
+                    emit MevAttackPrevented(from, block.number, "Too fast");
                     revert MEV_TOO_FAST();
                 }
             }
