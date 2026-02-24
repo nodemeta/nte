@@ -9,7 +9,7 @@ interface IERC20Minimal {
     function balanceOf(address account) external view returns (uint256);
 }
 
-/// @notice Minimal interface for the main NTE token used for ownership and pause state
+/// @notice Minimal interface for the main NTE token used for pause state and staking locks
 interface INTE is IERC20Minimal {
     /// @notice Returns the address of the token owner.
     function owner() external view returns (address);
@@ -96,6 +96,8 @@ contract NTEStaking {
     uint256 public constant BASIS_POINTS = 10_000;
     /// @notice Number of seconds in one year, used for APR calculations.
     uint256 public constant YEAR_IN_SECONDS = 365 days;
+    /// @notice Ownership lock period before allowing renounce / BNB emergency withdraw.
+    uint256 private constant OWNERSHIP_LOCK_PERIOD = 30 days;
 
     // ===================================================
     // STATE
@@ -103,6 +105,12 @@ contract NTEStaking {
 
     /// @notice The NTE token used for staking, ownership, and pause state.
     INTE public immutable stakingToken;
+    /// @notice Current owner of the staking contract.
+    address private _owner;
+    /// @notice Pending owner in the two-step ownership transfer flow.
+    address private _pendingOwner;
+    /// @notice Deployment timestamp used for ownership/withdrawal lock periods.
+    uint256 public immutable launchTime;
 
     LockPlan[] public lockPlans;
 
@@ -124,22 +132,28 @@ contract NTEStaking {
 
     event PlanAdded(uint256 indexed planId, uint256 lockDuration, uint256 aprBps);
     event PlanUpdated(uint256 indexed planId, uint256 lockDuration, uint256 aprBps, bool enabled);
+    event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
+    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
 
     event Staked(address indexed user, uint256 indexed stakeId, uint256 indexed planId, uint256 amount);
     event RewardClaimed(address indexed user, uint256 indexed stakeId, uint256 amount);
     event Withdrawn(address indexed user, uint256 indexed stakeId, uint256 principal, uint256 reward);
+    event PrincipalWithdrawn(address indexed user, uint256 indexed stakeId, uint256 principal);
     event EmergencyWithdraw(address indexed user, uint256 indexed stakeId, uint256 principal);
 
     event DepositsEnabledUpdated(bool enabled);
     event RewardCompounded(address indexed user, uint256 indexed stakeId, uint256 amount);
     event StakePlanExtended(address indexed user, uint256 indexed stakeId, uint256 fromPlanId, uint256 toPlanId);
+    event EmergencyTokenWithdraw(address indexed token, address indexed to, uint256 amount);
+    event EmergencyBNBWithdraw(address indexed to, uint256 amount);
+    event BNBReceived(address indexed sender, uint256 amount);
 
     // ===================================================
     // MODIFIERS
     // ===================================================
 
     modifier onlyOwner() {
-        require(msg.sender == stakingToken.owner(), "NOT_OWNER");
+        require(msg.sender == _owner, "NOT_OWNER");
         _;
     }
 
@@ -168,8 +182,14 @@ contract NTEStaking {
 
     constructor(address _stakingToken) {
         require(_stakingToken != address(0), "TOKEN_ZERO");
+        require(_stakingToken.code.length > 0, "TOKEN_NOT_CONTRACT");
         stakingToken = INTE(_stakingToken);
+        address initialOwner = stakingToken.owner();
+        require(initialOwner != address(0), "OWNER_ZERO");
+        _owner = initialOwner;
+        launchTime = block.timestamp;
         _status = 1;
+        emit OwnershipTransferred(address(0), initialOwner);
     }
 
     // ===================================================
@@ -179,6 +199,16 @@ contract NTEStaking {
     /// @notice Returns the number of configured lock plans.
     function getPlansCount() external view returns (uint256) {
         return lockPlans.length;
+    }
+
+    /// @notice Returns the staking contract owner.
+    function owner() external view returns (address) {
+        return _owner;
+    }
+
+    /// @notice Returns the pending owner in a two-step ownership transfer.
+    function pendingOwner() external view returns (address) {
+        return _pendingOwner;
     }
 
     /// @notice Returns all stake IDs owned by `user`.
@@ -304,6 +334,48 @@ contract NTEStaking {
     // ===================================================
     // OWNER FUNCTIONS
     // ===================================================
+
+    /**
+     * @notice Starts a two-step ownership transfer for this staking contract.
+     * @param newOwner The account that will be able to accept ownership.
+     */
+    function transferOwnership(address newOwner) external onlyOwner {
+        require(newOwner != address(0), "OWNER_ZERO");
+        require(newOwner != _owner, "OWNER_SAME");
+        _pendingOwner = newOwner;
+        emit OwnershipTransferStarted(_owner, newOwner);
+    }
+
+    /**
+     * @notice Accepts ownership transfer for this staking contract.
+     */
+    function acceptOwnership() external {
+        require(msg.sender == _pendingOwner, "NOT_PENDING_OWNER");
+        address previousOwner = _owner;
+        _owner = _pendingOwner;
+        _pendingOwner = address(0);
+        emit OwnershipTransferred(previousOwner, _owner);
+    }
+
+    /**
+     * @notice Cancels a pending ownership transfer.
+     */
+    function cancelOwnershipTransfer() external onlyOwner {
+        require(_pendingOwner != address(0), "NO_PENDING_TRANSFER");
+        _pendingOwner = address(0);
+        emit OwnershipTransferStarted(_owner, address(0));
+    }
+
+    /**
+     * @notice Renounces staking ownership after the lock period.
+     */
+    function renounceOwnership() external onlyOwner {
+        require(block.timestamp > launchTime + OWNERSHIP_LOCK_PERIOD, "OWNER_LOCKED");
+        address previousOwner = _owner;
+        _owner = address(0);
+        _pendingOwner = address(0);
+        emit OwnershipTransferred(previousOwner, address(0));
+    }
 
     /// @notice Adds a new lock plan for future stakes.
     function addStakePlan(uint256 lockDuration, uint256 aprBps) external onlyOwner {
@@ -435,13 +507,13 @@ contract NTEStaking {
         StakePosition storage pos = stakes[stakeId];
         require(pos.user == msg.sender, "NOT_OWNER_STAKE");
         require(!pos.withdrawn, "ALREADY_WITHDRAWN");
+        uint256 lockEnd = pos.startTime + pos.lockDuration;
 
         uint256 reward = pendingReward(stakeId);
         if (reward == 0) {
             return;
         }
 
-        pos.claimedReward += reward;
         pos.amount += reward;
 
         totalStaked += reward;
@@ -449,6 +521,16 @@ contract NTEStaking {
         // Send reward to user, then immediately lock it in the main token
         require(stakingToken.transfer(msg.sender, reward), "REWARD_TRANSFER_FAIL");
         stakingToken.lockFromStaking(msg.sender, reward);
+
+        // Reset reward baseline to avoid retroactive accrual on compounded amount,
+        // while preserving the original lock end time.
+        pos.startTime = block.timestamp;
+        if (lockEnd > block.timestamp) {
+            pos.lockDuration = lockEnd - block.timestamp;
+        } else {
+            pos.lockDuration = 0;
+        }
+        pos.claimedReward = 0;
 
         emit RewardCompounded(msg.sender, stakeId, reward);
     }
@@ -467,6 +549,9 @@ contract NTEStaking {
 
         LockPlan memory targetPlan = lockPlans[newPlanId];
         require(targetPlan.enabled, "PLAN_DISABLED");
+        uint256 currentLockEnd = pos.startTime + pos.lockDuration;
+        uint256 remainingLock = currentLockEnd > block.timestamp ? currentLockEnd - block.timestamp : 0;
+        require(targetPlan.lockDuration >= remainingLock, "LOCK_SHORTEN");
 
         uint256 reward = pendingReward(stakeId);
         if (reward > 0) {
@@ -509,6 +594,23 @@ contract NTEStaking {
         emit Withdrawn(msg.sender, stakeId, principal, reward);
     }
 
+    /// @notice Withdraws only principal after lock expiry, forfeiting unclaimed rewards.
+    function withdrawStakedPrincipalOnly(uint256 stakeId) external nonReentrant {
+        StakePosition storage pos = stakes[stakeId];
+        require(pos.user == msg.sender, "NOT_OWNER_STAKE");
+        require(!pos.withdrawn, "ALREADY_WITHDRAWN");
+        require(block.timestamp >= pos.startTime + pos.lockDuration, "LOCK_ACTIVE");
+
+        uint256 principal = pos.amount;
+        pos.withdrawn = true;
+        pos.amount = 0;
+        pos.claimedReward = 0;
+
+        totalStaked -= principal;
+        stakingToken.unlockFromStaking(msg.sender, principal);
+        emit PrincipalWithdrawn(msg.sender, stakeId, principal);
+    }
+
     /// @notice Performs an emergency exit by withdrawing principal before the lock ends.
     /// @dev All unclaimed rewards are forfeited.
     function emergencyWithdrawStakedTokens(uint256 stakeId) external nonReentrant {
@@ -526,18 +628,50 @@ contract NTEStaking {
         emit EmergencyWithdraw(msg.sender, stakeId, principal);
     }
 
-    /// @notice Allows the owner to recover any ERC20 tokens accidentally
-    ///         sent to this contract, except the staking token itself.
-    /// @dev Does not affect user principal or rewards accounting because
-    ///      `stakingToken` cannot be recovered via this function.
+    /**
+     * @notice Emergency function to withdraw ERC20 tokens from this contract.
+     * @dev Can withdraw any ERC20 held by this contract, including staking token rewards.
+     */
+    function emergencyWithdrawToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+        _withdrawToken(token, to, amount);
+    }
+
+    /// @notice Allows owner to recover non-staking ERC20 tokens sent accidentally.
     function recoverERC20(address token, address to, uint256 amount) external onlyOwner nonReentrant {
         require(token != address(stakingToken), "CANNOT_RECOVER_STAKING");
+        _withdrawToken(token, to, amount);
+    }
+
+    /**
+     * @notice Emergency function to withdraw BNB from this contract.
+     * @dev Only possible after the ownership lock period.
+     */
+    function emergencyWithdrawBNB(address payable to, uint256 amount) external onlyOwner nonReentrant {
+        require(block.timestamp > launchTime + OWNERSHIP_LOCK_PERIOD, "EMG_WAIT_30D");
         require(to != address(0), "TO_ZERO");
+        require(amount <= address(this).balance, "INSUFFICIENT_BNB_BALANCE");
+        (bool success, ) = to.call{value: amount}("");
+        require(success, "EMG_BNB_FAIL");
+        emit EmergencyBNBWithdraw(to, amount);
+    }
 
-        IERC20Minimal erc20 = IERC20Minimal(token);
-        uint256 balance = erc20.balanceOf(address(this));
+    /// @dev Shared internal token-withdraw helper with non-standard ERC20 handling.
+    function _withdrawToken(address token, address to, uint256 amount) internal {
+        require(token != address(0), "TOKEN_ZERO");
+        require(to != address(0), "TO_ZERO");
+        uint256 balance = IERC20Minimal(token).balanceOf(address(this));
         require(amount <= balance, "INSUFFICIENT_TOKEN_BALANCE");
+        bytes memory payload = abi.encodeWithSelector(IERC20Minimal.transfer.selector, to, amount);
+        (bool success, bytes memory returndata) = token.call(payload);
+        require(success, "TOKEN_TRANSFER_FAIL");
+        if (returndata.length > 0) {
+            require(abi.decode(returndata, (bool)), "TOKEN_TRANSFER_FAIL");
+        }
+        emit EmergencyTokenWithdraw(token, to, amount);
+    }
 
-        require(erc20.transfer(to, amount), "RECOVER_TRANSFER_FAIL");
+    /// @notice Allows this contract to receive BNB.
+    receive() external payable {
+        emit BNBReceived(msg.sender, msg.value);
     }
 }

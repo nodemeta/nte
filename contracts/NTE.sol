@@ -465,8 +465,12 @@ contract NTE is IERC20 {
 
     /// @notice The staking contract allowed to lock balances
     address public stakingContract;
+    /// @notice Whether staking reward payouts must satisfy whitelist checks when whitelist mode is enabled
+    bool public enforceWhitelistOnStakingRewards = true;
     /// @notice Amount of tokens locked in staking per user
     mapping(address => uint256) public lockedForStaking;
+    /// @notice Aggregate amount currently locked for staking across all users
+    uint256 public totalLockedForStaking;
 
     // ===================================================
     // EVENTS
@@ -547,6 +551,8 @@ contract NTE is IERC20 {
     event EmergencyBNBWithdraw(address indexed to, uint256 amount);
     /// @notice Emitted when the staking contract address is updated
     event StakingContractUpdated(address indexed newStakingContract);
+    /// @notice Emitted when staking reward whitelist enforcement is toggled
+    event StakingRewardWhitelistEnforcementUpdated(bool enabled);
     /// @notice Emitted when the PancakeSwap router is updated
     event PancakeRouterUpdated(address indexed newRouter);
     /// @notice Emitted when the primary PancakeSwap pair is updated
@@ -666,6 +672,8 @@ contract NTE is IERC20 {
     error VEL_CONFIG_INVALID();
     error VEL_LIMIT_HIGH();
     error DEX_PAIR_NOT_CONTRACT();
+    error STAKING_NOT_CONTRACT();
+    error STAKING_ACTIVE_LOCKS();
 
     /**
      * @dev Sets up the initial state of the NTE token.
@@ -1572,9 +1580,21 @@ contract NTE is IERC20 {
      */
     function setStakingContract(address _stakingContract) external onlyOwner {
         if (_stakingContract == address(0)) revert ADDR_ZERO();
+        if (!_isContract(_stakingContract)) revert STAKING_NOT_CONTRACT();
+        if (_stakingContract != stakingContract && totalLockedForStaking > 0) revert STAKING_ACTIVE_LOCKS();
         stakingContract = _stakingContract;
         
         emit StakingContractUpdated(_stakingContract);
+    }
+
+    /**
+     * @notice Toggles whitelist enforcement for staking reward payouts.
+     * @dev Only applies when whitelist mode is enabled.
+     * @param enabled True to enforce whitelist checks, false to bypass for staking rewards.
+     */
+    function setStakingRewardWhitelistEnforcement(bool enabled) external onlyOwner {
+        enforceWhitelistOnStakingRewards = enabled;
+        emit StakingRewardWhitelistEnforcementUpdated(enabled);
     }
 
     /**
@@ -1592,6 +1612,7 @@ contract NTE is IERC20 {
         unchecked {
             lockedForStaking[user] = locked + amount;
         }
+        totalLockedForStaking += amount;
         
         emit TokensLockedForStaking(user, amount);
     }
@@ -1610,6 +1631,7 @@ contract NTE is IERC20 {
         unchecked {
             lockedForStaking[user] = locked - amount;
         }
+        totalLockedForStaking -= amount;
         
         emit TokensUnlockedFromStaking(user, amount);
     }
@@ -1781,6 +1803,7 @@ contract NTE is IERC20 {
         if (amount == 0) revert TXN_AMOUNT_ZERO();
         if (from == address(0)) revert ADDR_FROM_ZERO();
         if (to == address(0)) revert ADDR_TO_ZERO();
+        bool isStakingRewardFlow = (from == stakingContract && msg.sender == stakingContract);
         
         // If we're paused, everything stops (unless you're the owner)
         if (_paused) {
@@ -1789,6 +1812,25 @@ contract NTE is IERC20 {
             } else {
                 if (from != _owner && to != _owner && msg.sender != _owner) revert SYS_DISABLED();
             }
+        }
+
+        // Staking reward payouts should not be throttled/taxed by trading protections.
+        // Keep pause and blacklist checks as global safety controls.
+        if (isStakingRewardFlow) {
+            if (isBlacklistedActive(from)) revert BL_SENDER();
+            if (isBlacklistedActive(to)) revert BL_RECIPIENT();
+            if (isBlacklistedActive(msg.sender) && msg.sender != from) revert BL_SENDER();
+
+            // Optional whitelist enforcement for staking reward payouts.
+            if (whitelistEnabled && enforceWhitelistOnStakingRewards) {
+                if (!(from == _owner || to == _owner || msg.sender == _owner ||
+                    isWhitelistedActive(from) || isWhitelistedActive(to) || isWhitelistedActive(msg.sender) ||
+                    from == address(this) || to == address(this))) {
+                    revert WL_REQUIRED();
+                }
+            }
+            _transfer(from, to, amount);
+            return;
         }
         
         // Launch day shields - very strict for the first hour or so
