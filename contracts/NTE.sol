@@ -662,6 +662,7 @@ contract NTE is IERC20 {
     error EMG_BNB_FAIL();
     error ADDR_INVALID();
     error ADDR_ZERO();
+    error ADDR_NOT_CONTRACT();
     error AUTH_ALREADY_SET();
     error AUTH_NOT_SET();
     error AUTH_ZERO_ADDR();
@@ -1213,7 +1214,30 @@ contract NTE is IERC20 {
         address collector
     ) external onlyOwner {
         if (percentageBps > BASIS_POINTS) revert PRICE_INVALID();
-        if (enabled && collector == address(0)) revert ADDR_ZERO();
+        if (enabled) {
+            if (collector == address(0)) revert ADDR_ZERO();
+            if (!_isContract(collector)) revert ADDR_NOT_CONTRACT();
+
+            // Ensure liquidity manager transfers are not blocked by tax/protection layers.
+            if (!taxExempt[collector]) {
+                taxExempt[collector] = true;
+                emit TaxExemptUpdated(collector, true);
+            }
+            if (!mevProtectionExempt[collector]) {
+                mevProtectionExempt[collector] = true;
+                emit MevProtectionExemptUpdated(collector, true);
+            }
+            if (!velocityLimitExempt[collector]) {
+                velocityLimitExempt[collector] = true;
+                emit VelocityLimitExemptUpdated(collector, true);
+            }
+            if (whitelistEnabled && (!isWhitelisted[collector] || whitelistExpiry[collector] != 0)) {
+                isWhitelisted[collector] = true;
+                whitelistExpiry[collector] = 0;
+                emit WhitelistUpdated(collector, true);
+            }
+        }
+
         autoLiquidityEnabled = enabled;
         autoLiquidityBps = percentageBps;
         liquidityCollector = collector;
@@ -1449,6 +1473,30 @@ contract NTE is IERC20 {
         if (account == address(0)) revert ADDR_INVALID();
         velocityLimitExempt[account] = exempt;
         emit VelocityLimitExemptUpdated(account, exempt);
+    }
+
+    /**
+     * @notice Returns whether an address is exempt from tax.
+     * @param account Address to query.
+     */
+    function isTaxExempt(address account) external view returns (bool) {
+        return taxExempt[account];
+    }
+
+    /**
+     * @notice Returns whether an address is exempt from MEV protection checks.
+     * @param account Address to query.
+     */
+    function isMevProtectionExempt(address account) external view returns (bool) {
+        return mevProtectionExempt[account];
+    }
+
+    /**
+     * @notice Returns whether an address is exempt from velocity limit checks.
+     * @param account Address to query.
+     */
+    function isVelocityLimitExempt(address account) external view returns (bool) {
+        return velocityLimitExempt[account];
     }
 
     /**
