@@ -102,7 +102,15 @@ contract NTECategoryHelper {
     // ===================================================
 
     /**
-     * @param _nte Address of the deployed NTE token.
+     * @notice Deploy the NTECategoryHelper, linking it to the main NTE token contract.
+     * @dev This helper simplifies categorized transfers by providing semantic function names
+     *      (Payment, Reward, Purchase, etc.) that forward to NTE.transactionFrom().
+     *      All actual token logic (balances, taxes, protections) remains in the NTE contract.
+     *      The deployer becomes the initial owner.
+     * @param _nte Address of the deployed NTE token contract with categorized transfer support.
+     * @custom:example constructor(0x123...NTE)
+     * @custom:security Validates _nte is not zero address; does not verify NTE interface compliance.
+     * @custom:reverts ADDR_ZERO if _nte is the zero address.
      */
     constructor(address _nte) {
         if (_nte == address(0)) revert ADDR_ZERO();
@@ -121,24 +129,41 @@ contract NTECategoryHelper {
 
     /**
      * @notice Returns the address of the current contract owner.
+     * @dev The owner has exclusive rights to configure emergency withdrawals and manage
+     *      ownership transfers. Ownership can be transferred via two-step process or
+     *      renounced after 30 days.
      * @return The address of the owner.
+     * @custom:example owner() => 0x123...abc
+     * @custom:security Owner is set at construction and can only change via transferOwnership/acceptOwnership.
      */
     function owner() external view returns (address) {
         return _owner;
     }
 
     /**
-     * @notice Returns the address of the pending owner.
+     * @notice Returns the address of the pending owner in the two-step ownership transfer.
+     * @dev Returns address(0) when no ownership transfer is in progress.
+     *      The pending owner must call acceptOwnership() to complete the transfer.
      * @return The address of the pending owner, or zero address if no transfer is pending.
+     * @custom:example pendingOwner() => 0x456...def (transfer in progress)
+     * @custom:example pendingOwner() => 0x000...000 (no pending transfer)
+     * @custom:security Two-step ownership prevents accidental transfers to wrong addresses.
      */
     function pendingOwner() external view returns (address) {
         return _pendingOwner;
     }
 
     /**
-     * @notice Transfers contract ownership to a new address.
-     * @dev Initiates a two-step ownership transfer. The new owner must call acceptOwnership() to complete the transfer.
+     * @notice Initiates a two-step ownership transfer to a new address.
+     * @dev The new owner must call acceptOwnership() to complete the transfer.
+     *      This prevents accidental transfers to incorrect or inaccessible addresses.
+     *      The current owner can call cancelOwnershipTransfer() before acceptance.
      * @param newOwner The address of the new owner.
+     * @custom:example transferOwnership(0x456...def)
+     * @custom:security Requires caller to be current owner; prevents transfers to zero or same address.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts AUTH_ZERO_OWNER if newOwner is the zero address.
+     * @custom:reverts AUTH_SAME_OWNER if newOwner is already the current owner.
      */
     function transferOwnership(address newOwner) external onlyOwner {
         if (newOwner == address(0)) revert AUTH_ZERO_OWNER();
@@ -148,8 +173,13 @@ contract NTECategoryHelper {
     }
 
     /**
-     * @notice Accepts ownership transfer.
-     * @dev Can only be called by the pending owner to complete the two-step transfer process.
+     * @notice Accepts ownership transfer and completes the two-step ownership change.
+     * @dev Only the pending owner can call this function. Once accepted, msg.sender
+     *      becomes the new owner and pendingOwner is reset to zero address.
+     * @custom:example acceptOwnership() // called by pending owner
+     * @custom:security Only callable by the address set in transferOwnership().
+     * @custom:reverts AUTH_NOT_PENDING_OWNER if caller is not the pending owner.
+     * @custom:usecase Complete ownership transfer after previous owner called transferOwnership().
      */
     function acceptOwnership() external {
         if (msg.sender != _pendingOwner) revert AUTH_NOT_PENDING_OWNER();
@@ -160,8 +190,14 @@ contract NTECategoryHelper {
     }
 
     /**
-     * @notice Cancels a pending ownership transfer.
-     * @dev Can only be called by the current owner.
+     * @notice Cancels a pending ownership transfer before the new owner accepts.
+     * @dev Resets pendingOwner to zero address, allowing the owner to either keep
+     *      ownership or initiate a transfer to a different address.
+     * @custom:example cancelOwnershipTransfer() // reverts pending transfer
+     * @custom:security Only the current owner can cancel; does not affect current ownership.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts AUTH_NO_PENDING_TRANSFER if there is no pending transfer to cancel.
+     * @custom:usecase Cancel mistaken ownership transfer or revoke access before acceptance.
      */
     function cancelOwnershipTransfer() external onlyOwner {
         if (_pendingOwner == address(0)) revert AUTH_NO_PENDING_TRANSFER();
@@ -170,8 +206,16 @@ contract NTECategoryHelper {
     }
 
     /**
-     * @notice Renounces contract ownership, making the contract ownerless.
-     * @dev Only possible 30 days after launch for security.
+     * @notice Renounces contract ownership permanently, making the contract ownerless.
+     * @dev Sets owner to zero address after 30-day lock period for security.
+     *      Once renounced, owner-restricted functions (emergency withdrawals, ownership
+     *      transfers) become permanently inaccessible. The categorized transfer functions
+     *      continue to work normally as they forward to NTE.
+     * @custom:example renounceOwnership() // 31+ days after deployment
+     * @custom:security Requires 30 days since launch to prevent accidental early renunciation.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts AUTH_LOCKED if called before launchTime + 30 days.
+     * @custom:usecase Decentralize the helper after verifying correct NTE integration.
      */
     function renounceOwnership() external onlyOwner {
         if (block.timestamp <= launchTime + OWNERSHIP_LOCK_PERIOD) revert AUTH_LOCKED();
@@ -186,10 +230,22 @@ contract NTECategoryHelper {
 
     /**
      * @notice Emergency function to withdraw stuck ERC20 tokens from the contract.
-     * @dev Can withdraw any ERC20 token held by this contract.
-     * @param token The address of the token to withdraw.
-     * @param to The recipient address.
-     * @param amount The amount to withdraw.
+     * @dev Recovers any ERC20 tokens accidentally sent to this helper contract.
+     *      Uses low-level call to handle non-standard ERC20 implementations.
+     *      The helper is not designed to hold tokens, so any balance here is likely
+     *      accidental and can be safely recovered.
+     * @param token The address of the ERC20 token to withdraw.
+     * @param to The recipient address for the withdrawn tokens.
+     * @param amount The number of tokens to withdraw.
+     * @custom:example emergencyWithdrawToken(0xABC...token, 0x456...recipient, 1000e18)
+     * @custom:security Validates token/recipient addresses and sufficient balance before transfer.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts SEC_REENTRY on reentrant call attempts.
+     * @custom:reverts EMG_INVALID_TOKEN if token is zero address.
+     * @custom:reverts EMG_ZERO_RECIP if recipient is zero address.
+     * @custom:reverts EMG_INSUF_BAL if contract balance is less than requested amount.
+     * @custom:reverts EMG_TRANSFER_FAIL if the token transfer fails.
+     * @custom:usecase Recover tokens sent to helper by mistake; does not affect NTE token operations.
      */
     function emergencyWithdrawToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
         if (token == address(0)) revert EMG_INVALID_TOKEN();
@@ -214,9 +270,20 @@ contract NTECategoryHelper {
 
     /**
      * @notice Emergency function to withdraw BNB from the contract.
-     * @dev Only possible 30 days after launch for security.
-     * @param to The recipient address.
-     * @param amount The amount to withdraw.
+     * @dev Recovers native BNB accidentally sent to this helper contract.
+     *      Requires 30 days since launch to prevent premature withdrawals during setup.
+     *      The helper normally has no reason to hold BNB, so this is purely a recovery tool.
+     * @param to The recipient address for the withdrawn BNB.
+     * @param amount The amount of BNB (in wei) to withdraw.
+     * @custom:example emergencyWithdrawBNB(payable(0x456...recipient), 1 ether)
+     * @custom:security 30-day lock prevents owner from immediately draining accidentally sent funds.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts SEC_REENTRY on reentrant call attempts.
+     * @custom:reverts EMG_WAIT_30D if called before launchTime + 30 days.
+     * @custom:reverts EMG_INVALID_RECIP if recipient is zero address.
+     * @custom:reverts EMG_INSUF_BAL_BNB if contract balance is less than requested amount.
+     * @custom:reverts EMG_BNB_FAIL if the BNB transfer fails.
+     * @custom:usecase Recover BNB sent to helper by mistake after 30-day safety period.
      */
     function emergencyWithdrawBNB(address payable to, uint256 amount) external onlyOwner nonReentrant {
         if (block.timestamp <= launchTime + OWNERSHIP_LOCK_PERIOD) revert EMG_WAIT_30D();
@@ -228,7 +295,24 @@ contract NTECategoryHelper {
         emit EmergencyBNBWithdraw(to, amount);
     }
 
-    /// @notice Generic categorized transfer.
+    /**
+     * @notice Generic categorized transfer with custom metadata and optional authorization.
+     * @dev Forwards the call to NTE.transactionFrom() for processing.
+     *      All tax logic, protections, and balance management happen in the NTE contract.
+     *      This helper simply provides a user-friendly interface.
+     * @param to The recipient address.
+     * @param amount The number of NTE tokens to transfer.
+     * @param category The transaction category code (0-255) for off-chain categorization.
+     * @param signature Optional EIP-712 signature for authorized/delegated transfers (empty bytes for none).
+     * @param nonce Nonce for signature replay protection (0 if no signature).
+     * @param deadline Unix timestamp after which signature expires (0 if no signature).
+     * @param txReference Optional external transaction/order reference ID (e.g., invoice number).
+     * @param memo Optional human-readable memo or description.
+     * @return True if the transfer succeeds.
+     * @custom:example Transaction(recipient, 100e18, 1, "", 0, 0, "INV-2026-001", "Equipment purchase")
+     * @custom:security Actual authorization, tax, and anti-bot logic handled by NTE contract.
+     * @custom:usecase Generic categorized transfer when named aliases (Payment, Reward, etc.) don't fit.
+     */
     function Transaction(
         address to,
         uint256 amount,

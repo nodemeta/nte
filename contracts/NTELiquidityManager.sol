@@ -177,9 +177,16 @@ contract NTELiquidityManager {
 
     /**
      * @notice Deploys a new liquidity manager instance.
+     * @dev Initializes the manager with the NTE token, Pancake router, and LP recipient.
+     *      The deployer becomes the initial owner and is automatically set as an approved keeper.
+     *      Auto-liquidity is restricted to keepers by default for security.
      * @param _nteToken Address of the NTE token.
      * @param _router Address of the Pancake router.
      * @param _lpRecipient Address that will receive LP tokens.
+     * @custom:example constructor(0x123...NTE, 0x456...Router, 0x789...LP)
+     * @custom:security Validates all addresses are non-zero and token/router are contracts.
+     * @custom:reverts ADDR_ZERO if any address is zero.
+     * @custom:reverts ADDR_NOT_CONTRACT if NTE or router is not a contract.
      */
     constructor(address _nteToken, address _router, address _lpRecipient) {
         if (_nteToken == address(0)) revert ADDR_ZERO();
@@ -204,20 +211,43 @@ contract NTELiquidityManager {
     // OWNERSHIP
     // ===================================================
 
-    /// @notice Returns the current manager owner.
+    /**
+     * @notice Returns the current manager owner.
+     * @dev The owner has exclusive rights to configure liquidity manager settings,
+     *      update router/recipient, and perform emergency withdrawals. Ownership can
+     *      be transferred via two-step process or renounced after 30 days.
+     * @return The address of the owner.
+     * @custom:example owner() => 0x123...abc
+     * @custom:security Owner is set at construction and can only change via transferOwnership/acceptOwnership.
+     */
     function owner() external view returns (address) {
         return _owner;
     }
 
-    /// @notice Returns the pending owner.
+    /**
+     * @notice Returns the pending owner in the two-step ownership transfer.
+     * @dev Returns address(0) when no ownership transfer is in progress.
+     *      The pending owner must call acceptOwnership() to complete the transfer.
+     * @return The address of the pending owner, or zero address if no transfer is pending.
+     * @custom:example pendingOwner() => 0x456...def (transfer in progress)
+     * @custom:example pendingOwner() => 0x000...000 (no pending transfer)
+     * @custom:security Two-step ownership prevents accidental transfers to wrong addresses.
+     */
     function pendingOwner() external view returns (address) {
         return _pendingOwner;
     }
 
     /**
-     * @notice Transfers manager ownership to a new address.
-     * @dev Initiates a two-step ownership transfer.
+     * @notice Initiates a two-step ownership transfer to a new address.
+     * @dev The new owner must call acceptOwnership() to complete the transfer.
+     *      This prevents accidental transfers to incorrect or inaccessible addresses.
+     *      The current owner can call cancelOwnershipTransfer() before acceptance.
      * @param newOwner The address of the new owner.
+     * @custom:example transferOwnership(0x456...def)
+     * @custom:security Requires caller to be current owner; prevents transfers to zero or same address.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts AUTH_ZERO_OWNER if newOwner is the zero address.
+     * @custom:reverts AUTH_SAME_OWNER if newOwner is already the current owner.
      */
     function transferOwnership(address newOwner) external onlyOwner {
         if (newOwner == address(0)) revert AUTH_ZERO_OWNER();
@@ -227,8 +257,13 @@ contract NTELiquidityManager {
     }
 
     /**
-     * @notice Accepts ownership transfer.
-     * @dev Can only be called by the pending owner.
+     * @notice Accepts ownership transfer and completes the two-step ownership change.
+     * @dev Only the pending owner can call this function. Once accepted, msg.sender
+     *      becomes the new owner and pendingOwner is reset to zero address.
+     * @custom:example acceptOwnership() // called by pending owner
+     * @custom:security Only callable by the address set in transferOwnership().
+     * @custom:reverts AUTH_NOT_PENDING_OWNER if caller is not the pending owner.
+     * @custom:usecase Complete ownership transfer after previous owner called transferOwnership().
      */
     function acceptOwnership() external {
         if (msg.sender != _pendingOwner) revert AUTH_NOT_PENDING_OWNER();
@@ -239,8 +274,14 @@ contract NTELiquidityManager {
     }
 
     /**
-     * @notice Cancels a pending ownership transfer.
-     * @dev Can only be called by current owner.
+     * @notice Cancels a pending ownership transfer before the new owner accepts.
+     * @dev Resets pendingOwner to zero address, allowing the owner to either keep
+     *      ownership or initiate a transfer to a different address.
+     * @custom:example cancelOwnershipTransfer() // reverts pending transfer
+     * @custom:security Only the current owner can cancel; does not affect current ownership.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts AUTH_NO_PENDING_TRANSFER if there is no pending transfer to cancel.
+     * @custom:usecase Cancel mistaken ownership transfer or revoke access before acceptance.
      */
     function cancelOwnershipTransfer() external onlyOwner {
         if (_pendingOwner == address(0)) revert AUTH_NO_PENDING_TRANSFER();
@@ -249,8 +290,15 @@ contract NTELiquidityManager {
     }
 
     /**
-     * @notice Renounces manager ownership.
-     * @dev Only possible 30 days after deployment.
+     * @notice Renounces manager ownership permanently, making the contract ownerless.
+     * @dev Sets owner to zero address after 30-day lock period for security.
+     *      Once renounced, owner-restricted functions (configuration, emergency withdrawals)
+     *      become permanently inaccessible. Automatic liquidity operations continue if enabled.
+     * @custom:example renounceOwnership() // 31+ days after deployment
+     * @custom:security Requires 30 days since launch to prevent accidental early renunciation.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts AUTH_LOCKED if called before launchTime + 30 days.
+     * @custom:usecase Decentralize the manager after verifying correct configuration.
      */
     function renounceOwnership() external onlyOwner {
         if (block.timestamp <= launchTime + OWNERSHIP_LOCK_PERIOD) revert AUTH_LOCKED();
@@ -261,9 +309,15 @@ contract NTELiquidityManager {
     }
 
     /**
-     * @notice Updates the Pancake router used for swaps and liquidity.
-     * @dev Only callable by manager owner.
+     * @notice Updates the Pancake router used for swaps and liquidity.     * @dev Revokes allowance from previous router (if different) for security.
+     *      The new router must be a valid contract address.
      * @param _router New router address.
+     * @custom:example setRouter(0xABC...newRouter)
+     * @custom:security Validates router is non-zero and is a contract; resets old router allowance.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts ADDR_ZERO if router is the zero address.
+     * @custom:reverts ADDR_NOT_CONTRACT if router is not a contract.
+     * @custom:usecase Update router after PancakeSwap upgrade or migration to new DEX.
      */
     function setRouter(address _router) external onlyOwner {
         if (_router == address(0)) revert ADDR_ZERO();
@@ -281,8 +335,14 @@ contract NTELiquidityManager {
 
     /**
      * @notice Updates the LP recipient address.
-     * @dev LP tokens minted by the router will be sent here.
+     * @dev LP tokens minted by the router will be sent to this address.
+     *      Typically set to treasury or burn address for permanent liquidity locking.
      * @param _recipient New LP recipient address.
+     * @custom:example setLpRecipient(0x456...treasury)
+     * @custom:security Validates recipient is non-zero address.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts ADDR_ZERO if recipient is the zero address.
+     * @custom:usecase Update LP recipient for treasury management or liquidity locking strategy.
      */
     function setLpRecipient(address _recipient) external onlyOwner {
         if (_recipient == address(0)) revert ADDR_ZERO();
@@ -292,8 +352,15 @@ contract NTELiquidityManager {
 
     /**
      * @notice Configures automatic liquidity operations.
+     * @dev When enabled, allows autoAddLiquidity() to execute if minimum threshold is met.
+     *      The minimum must be at least 2 tokens to allow 50/50 split for swap and liquidity.
      * @param enabled True to enable auto-liquidity logic.
      * @param _minTokensToLiquify Minimum NTE balance required to trigger a cycle.
+     * @custom:example configureAutoOperations(true, 1000e18)
+     * @custom:security Enforces minimum of 2 tokens when enabled to prevent division errors.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts CFG_MIN_TOKENS if enabled but minimum is less than 2.
+     * @custom:usecase Enable automatic liquidity adding when tax accumulation reaches threshold.
      */
     function configureAutoOperations(bool enabled, uint256 _minTokensToLiquify) external onlyOwner {
         if (enabled) {
@@ -308,10 +375,18 @@ contract NTELiquidityManager {
 
     /**
      * @notice Configures auto-liquidity slippage and deadline controls.
+     * @dev These parameters protect against sandwich attacks and ensure sufficient output.
+     *      All slippage values must be non-zero to prevent accepting zero-output swaps/liquidity.
      * @param minEthOut Minimum ETH output accepted from the swap leg.
      * @param amountTokenMin Minimum token amount accepted in add-liquidity.
      * @param amountETHMin Minimum ETH amount accepted in add-liquidity.
      * @param deadlineWindow Deadline window (seconds) from the current block time.
+     * @custom:example configureAutoExecution(0.01 ether, 100e18, 0.005 ether, 300)
+     * @custom:security All parameters must be non-zero to prevent accepting unfavorable trades.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts CFG_SLIPPAGE_ZERO if any slippage parameter is zero.
+     * @custom:reverts CFG_DEADLINE_WINDOW if deadline window is zero.
+     * @custom:usecase Set slippage tolerance and deadline for automated liquidity operations.
      */
     function configureAutoExecution(
         uint256 minEthOut,
@@ -330,7 +405,13 @@ contract NTELiquidityManager {
 
     /**
      * @notice Configures whether auto-liquidity is restricted to owner/approved keepers.
+     * @dev When true, only owner and approved keepers can call autoAddLiquidity().
+     *      When false, any address can trigger auto-liquidity if conditions are met.
      * @param onlyKeepers True to restrict calls, false to allow any caller.
+     * @custom:example setAutoCallerPolicy(false) // allow public automation
+     * @custom:security Restricting to keepers provides centralized control; public allows permissionless bots.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:usecase Enable permissionless automation or restrict to trusted keepers.
      */
     function setAutoCallerPolicy(bool onlyKeepers) external onlyOwner {
         autoOnlyKeepers = onlyKeepers;
@@ -339,8 +420,15 @@ contract NTELiquidityManager {
 
     /**
      * @notice Grants or revokes keeper permission for `autoAddLiquidity`.
+     * @dev Keepers are addresses authorized to call autoAddLiquidity() when autoOnlyKeepers is true.
+     *      Owner is automatically a keeper and does not need explicit approval.
      * @param keeper Keeper address.
      * @param allowed True to allow, false to revoke.
+     * @custom:example setAutoLiquidityKeeper(0xABC...bot, true)
+     * @custom:security Owner can add/remove keepers at any time; validates keeper is non-zero.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts ADDR_ZERO if keeper is the zero address.
+     * @custom:usecase Authorize trusted bot addresses or revoke compromised keepers.
      */
     function setAutoLiquidityKeeper(address keeper, bool allowed) external onlyOwner {
         if (keeper == address(0)) revert ADDR_ZERO();
@@ -348,12 +436,26 @@ contract NTELiquidityManager {
         emit AutoKeeperUpdated(keeper, allowed);
     }
 
-    /// @notice Returns the NTE balance currently held by this contract.
+    /**
+     * @notice Returns the NTE balance currently held by this contract.
+     * @dev This is the amount available for liquidity operations. Does not include LP tokens.
+     *      Contract receives NTE via tax transfers from the main token contract.
+     * @return The NTE token balance available in this manager.
+     * @custom:example availableTokenBalance() returns 5000e18 // 5000 NTE available
+     * @custom:usecase Check if sufficient tokens accumulated before manual or auto liquidity cycles.
+     */
     function availableTokenBalance() public view returns (uint256) {
         return nteToken.balanceOf(address(this));
     }
 
-    /// @dev Ensures the router has enough allowance to move `amount` tokens from this contract.
+    /**
+     * @dev Ensures the router has enough allowance to move `amount` tokens from this contract.
+     *      If current allowance is insufficient, approves max uint256 to avoid repeated approvals.
+     *      Optimizes gas by checking current allowance before approving.
+     * @param amount The minimum allowance required for the upcoming operation.
+     * @custom:security Sets to max uint256 for gas efficiency; router is trusted PancakeSwap contract.
+     * @custom:reverts "APPROVE_FAIL" if approval transaction fails.
+     */
     function _ensureRouterAllowance(uint256 amount) internal {
         uint256 current = nteToken.allowance(address(this), address(router));
         if (current < amount) {
@@ -363,14 +465,24 @@ contract NTELiquidityManager {
     }
 
     /**
-    * @notice Manually runs a full NTE/BNB liquidity cycle.
+     * @notice Manually runs a full NTE/BNB liquidity cycle.
      * @dev Splits tokens into two halves, swaps one half for BNB, then
      *      adds liquidity with the remaining tokens and received BNB.
+     *      Owner has full control over amounts and slippage for manual operations.
      * @param tokenAmountToLiquify Total NTE amount to use from this contract.
      * @param minEthOut Minimum acceptable BNB output from the swap leg.
      * @param amountTokenMin Minimum acceptable NTE amount used in add-liquidity.
      * @param amountETHMin Minimum acceptable BNB amount used in add-liquidity.
      * @param deadline Unix timestamp deadline used for both router operations.
+     * @custom:example runLiquidityCycle(1000e18, 0.1 ether, 400e18, 0.08 ether, block.timestamp + 300)
+     * @custom:security Requires owner, validates sufficient balance, enforces non-zero slippage parameters.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts CFG_MIN_TOKENS if amount is less than 2.
+     * @custom:reverts CFG_SLIPPAGE_ZERO if any slippage parameter is zero.
+     * @custom:reverts CFG_DEADLINE_EXPIRED if deadline is in the past.
+     * @custom:reverts "INSUF_TOKENS" if contract doesn't hold enough tokens.
+     * @custom:reverts "ROUTER_ZERO" if router is not set.
+     * @custom:usecase Manually trigger liquidity addition with custom parameters.
      */
     function runLiquidityCycle(
         uint256 tokenAmountToLiquify,
@@ -403,9 +515,15 @@ contract NTELiquidityManager {
     }
 
     /**
-    * @notice Triggers an automatic NTE/BNB liquidity add if the configured
+     * @notice Triggers an automatic NTE/BNB liquidity add if the configured
      *         minimum token threshold is met.
      * @dev Can be restricted to owner/approved keepers via `setAutoCallerPolicy`.
+     *      Uses pre-configured auto-execution parameters for slippage and deadline.
+     *      Silently returns if conditions aren't met (no revert for flexibility).
+     * @custom:example autoAddLiquidity() // called by keeper or bot
+     * @custom:security Respects keeper restrictions, validates all auto-config parameters set.
+     * @custom:reverts AUTH_AUTO_CALLER if caller is not authorized (when autoOnlyKeepers is true).
+     * @custom:usecase Permissionless or keeper-triggered automatic liquidity management.
      */
     function autoAddLiquidity() external notPaused nonReentrant {
         if (autoOnlyKeepers && msg.sender != _owner && !autoLiquidityKeeper[msg.sender]) {
@@ -442,7 +560,18 @@ contract NTELiquidityManager {
         _addLiquidity(otherHalf, ethReceived, autoAmountTokenMin, autoAmountETHMin, deadline);
     }
 
-    /// @dev Swaps `tokenAmount` NTE for the native coin (BNB on BSC).
+    /**
+     * @dev Swaps `tokenAmount` NTE for the native coin (BNB on BSC) via PancakeSwap.
+     *      Uses swapExactTokensForETHSupportingFeeOnTransferTokens to handle fee-on-transfer tokens.
+     *      Constructs path: NTE -> WETH (WBNB on BSC). Received native coin stays in this contract.
+     * @param tokenAmount The amount of NTE tokens to swap.
+     * @param minEthOut The minimum acceptable native coin (BNB) output to prevent slippage.
+     * @param deadline The unix timestamp deadline; swap must complete before this time.
+     * @custom:security Validates non-zero amount and deadline; slippage protection via minEthOut.
+     * @custom:reverts "AMOUNT_ZERO" if tokenAmount is zero.
+     * @custom:reverts CFG_DEADLINE_EXPIRED if deadline has passed.
+     * @custom:reverts PancakeRouter errors if slippage exceeds tolerance or liquidity insufficient.
+     */
     function _swapTokensForETH(uint256 tokenAmount, uint256 minEthOut, uint256 deadline) internal {
         require(tokenAmount > 0, "AMOUNT_ZERO");
         if (deadline < block.timestamp) revert CFG_DEADLINE_EXPIRED();
@@ -461,7 +590,23 @@ contract NTELiquidityManager {
         );
     }
 
-    /// @dev Adds NTE/BNB liquidity using the router, sending LP tokens to `lpRecipient`.
+    /**
+     * @dev Adds NTE/BNB liquidity to PancakeSwap using the router, sending LP tokens to `lpRecipient`.
+     *      Validates all parameters including non-zero slippage minimums and valid recipient.
+     *      Uses native coin (BNB) held in contract balance from previous swap operation.
+     * @param tokenAmount The amount of NTE tokens to add to liquidity pool.
+     * @param ethAmount The amount of native coin (BNB) to add to liquidity pool.
+     * @param amountTokenMin The minimum NTE amount accepted (slippage protection).
+     * @param amountETHMin The minimum BNB amount accepted (slippage protection).
+     * @param deadline The unix timestamp deadline; operation must complete before this time.
+     * @custom:security Validates non-zero amounts and recipient; slippage protection prevents unfavorable ratios.
+     * @custom:reverts "AMOUNT_ZERO" if tokenAmount is zero.
+     * @custom:reverts "ETH_ZERO" if ethAmount is zero.
+     * @custom:reverts "RECIP_ZERO" if lpRecipient is zero address.
+     * @custom:reverts CFG_SLIPPAGE_ZERO if any slippage minimum is zero.
+     * @custom:reverts CFG_DEADLINE_EXPIRED if deadline has passed.
+     * @custom:reverts PancakeRouter errors if slippage exceeded or insufficient liquidity.
+     */
     function _addLiquidity(
         uint256 tokenAmount,
         uint256 ethAmount,
@@ -489,11 +634,22 @@ contract NTELiquidityManager {
     }
 
     /**
-     * @notice Emergency function to withdraw arbitrary ERC20 tokens from this contract.
-     * @dev Owner-controlled; can withdraw NTE, LP tokens, or any other ERC20.
-     * @param token Address of the token to withdraw.
-     * @param to Recipient address.
-     * @param amount Amount to withdraw.
+     * @notice Emergency function to withdraw stuck ERC20 tokens from the contract.
+     * @dev Recovers any ERC20 tokens accidentally sent to this manager contract.
+     *      Uses low-level call to handle non-standard ERC20 implementations.
+     *      Can withdraw NTE tokens if accidentally over-funded.
+     * @param token The address of the ERC20 token to withdraw.
+     * @param to The recipient address for the withdrawn tokens.
+     * @param amount The number of tokens to withdraw.
+     * @custom:example emergencyWithdrawToken(0xABC...token, 0x456...recipient, 1000e18)
+     * @custom:security Validates addresses and balance before transfer; owner-only access.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts SEC_REENTRY on reentrant call attempts.
+     * @custom:reverts EMG_INVALID_TOKEN if token is zero address.
+     * @custom:reverts EMG_ZERO_RECIP if recipient is zero address.
+     * @custom:reverts EMG_INSUF_BAL if contract balance is less than requested amount.
+     * @custom:reverts EMG_TRANSFER_FAIL if the token transfer fails.
+     * @custom:usecase Recover tokens sent to manager by mistake or rescue over-funded NTE.
      */
     function emergencyWithdrawToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
         if (token == address(0)) revert EMG_INVALID_TOKEN();
@@ -512,10 +668,21 @@ contract NTELiquidityManager {
     }
 
     /**
-     * @notice Emergency function to withdraw BNB from this contract.
-     * @dev Only possible 30 days after deployment.
-     * @param to Recipient address.
-     * @param amount Amount of BNB to withdraw.
+     * @notice Emergency function to withdraw BNB from the contract.
+     * @dev Recovers native BNB accidentally sent to this manager contract.
+     *      Requires 30 days since launch to prevent premature withdrawals during setup.
+     *      Leftover BNB from liquidity operations can be recovered.
+     * @param to The recipient address for the withdrawn BNB.
+     * @param amount The amount of BNB (in wei) to withdraw.
+     * @custom:example emergencyWithdrawBNB(payable(0x456...recipient), 1 ether)
+     * @custom:security 30-day lock prevents owner from immediately draining accidentally sent funds.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts SEC_REENTRY on reentrant call attempts.
+     * @custom:reverts EMG_WAIT_30D if called before launchTime + 30 days.
+     * @custom:reverts EMG_INVALID_RECIP if recipient is zero address.
+     * @custom:reverts EMG_INSUF_BAL_BNB if contract balance is less than requested amount.
+     * @custom:reverts EMG_BNB_FAIL if the BNB transfer fails.
+     * @custom:usecase Recover BNB sent to manager by mistake after 30-day safety period.
      */
     function emergencyWithdrawBNB(address payable to, uint256 amount) external onlyOwner nonReentrant {
         _emergencyWithdrawNative(to, amount);
@@ -523,15 +690,36 @@ contract NTELiquidityManager {
 
     /**
      * @notice Emergency function to withdraw BNB from this contract.
-     * @dev Legacy alias for `emergencyWithdrawBNB`.
-     * @param to Recipient address.
-     * @param amount Amount of BNB to withdraw.
+     * @dev Legacy alias for `emergencyWithdrawBNB`. Maintains backward compatibility.
+     *      Subject to same 30-day lock period and validations as emergencyWithdrawBNB().
+     * @param to Recipient address for the withdrawn BNB.
+     * @param amount Amount of BNB (in wei) to withdraw.
+     * @custom:example emergencyWithdrawETH(payable(0x456...recipient), 1 ether)
+     * @custom:security Identical security constraints as emergencyWithdrawBNB(); 30-day delay enforced.
+     * @custom:reverts AUTH_OWNER if caller is not the owner.
+     * @custom:reverts SEC_REENTRY on reentrant call attempts.
+     * @custom:reverts EMG_WAIT_30D if called before launchTime + 30 days.
+     * @custom:reverts EMG_INVALID_RECIP if recipient is zero address.
+     * @custom:reverts EMG_INSUF_BAL_BNB if contract balance is less than requested amount.
+     * @custom:reverts EMG_BNB_FAIL if the BNB transfer fails.
+     * @custom:usecase Legacy function name; use emergencyWithdrawBNB() for clarity.
      */
     function emergencyWithdrawETH(address payable to, uint256 amount) external onlyOwner nonReentrant {
         _emergencyWithdrawNative(to, amount);
     }
 
-    /// @dev Shared native coin emergency withdraw logic.
+    /**
+     * @dev Shared native coin emergency withdraw logic for BNB operations.
+     *      Validates 30-day lock period, recipient address, balance, and transfer success.
+     *      Emits both legacy (EmergencyETHWithdraw) and current (EmergencyBNBWithdraw) events.
+     * @param to Recipient address for the withdrawn native coin (BNB).
+     * @param amount Amount of native coin (in wei) to withdraw.
+     * @custom:security 30-day time lock prevents premature withdrawals after deployment.
+     * @custom:reverts EMG_WAIT_30D if called before launchTime + OWNERSHIP_LOCK_PERIOD.
+     * @custom:reverts EMG_INVALID_RECIP if recipient is zero address.
+     * @custom:reverts EMG_INSUF_BAL_BNB if contract's BNB balance is less than amount.
+     * @custom:reverts EMG_BNB_FAIL if low-level BNB transfer call fails.
+     */
     function _emergencyWithdrawNative(address payable to, uint256 amount) internal {
         if (block.timestamp <= launchTime + OWNERSHIP_LOCK_PERIOD) revert EMG_WAIT_30D();
         if (to == address(0)) revert EMG_INVALID_RECIP();
@@ -542,6 +730,13 @@ contract NTELiquidityManager {
         emit EmergencyBNBWithdraw(to, amount);
     }
 
+    /**
+     * @notice Allows this contract to receive BNB from router swaps and other sources.
+     * @dev Required for receiving BNB from PancakeSwap router during swapExactTokensForETH operations.
+     *      Also accepts direct BNB transfers. Emits BNBReceived event for tracking.
+     * @custom:example Automatically called when router sends BNB after swap
+     * @custom:usecase Receive BNB from PancakeSwap swaps for subsequent liquidity addition.
+     */
     receive() external payable {
         emit BNBReceived(msg.sender, msg.value);
     }
