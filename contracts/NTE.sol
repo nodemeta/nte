@@ -290,17 +290,6 @@ contract NTE is IERC20 {
     // SMART CATEGORIES - Organized Payments
     // ===================================================
     
-    /// @notice Details for a categorized transaction
-    struct CategorizedTransaction {
-        address from;
-        address to;
-        uint256 amount;
-        uint8 category;
-        string txReference;
-        string memo;
-        uint256 timestamp;
-    }
-    
     /// @notice How many trades happened in each category
     mapping(uint8 => uint256) public categoryTransactionCount;
     /// @notice Total volume of tokens moved per category
@@ -309,13 +298,6 @@ contract NTE is IERC20 {
     mapping(address => mapping(uint8 => uint256)) public userCategoryCount;
     /// @notice Your personal volume per category
     mapping(address => mapping(uint8 => uint256)) public userCategoryVolume;
-    
-    /// @notice A list of the most recent categorized transfers
-    CategorizedTransaction[] private recentCategorizedTxs;
-    /// @notice We only keep the last 100 categorized trades in memory
-    uint256 private constant MAX_STORED_TXS = 100;
-    /// @notice Internal tracker for the rolling transaction list
-    uint256 private _categorizedTxCounter;
     
     /// @notice Whether a specific category is active right now
     mapping(uint8 => bool) public categoryEnabled;
@@ -913,24 +895,6 @@ contract NTE is IERC20 {
             if (userCategoryVolume[from][category] > type(uint256).max - amount) revert TXN_OVERFLOW();
             userCategoryVolume[from][category] += amount;
         }
-
-        CategorizedTransaction memory newTx = CategorizedTransaction({
-            from: from,
-            to: to,
-            amount: amount,
-            category: category,
-            txReference: txReference,
-            memo: memo,
-            timestamp: block.timestamp
-        });
-
-        uint256 currentIndex = _categorizedTxCounter % MAX_STORED_TXS;
-        if (recentCategorizedTxs.length < MAX_STORED_TXS) {
-            recentCategorizedTxs.push(newTx);
-        } else {
-            recentCategorizedTxs[currentIndex] = newTx;
-        }
-        _categorizedTxCounter++;
 
         userCategorizedNonce[from] = expectedNonce + 1;
 
@@ -1719,6 +1683,24 @@ contract NTE is IERC20 {
         totalLockedForStaking -= amount;
         
         emit TokensUnlockedFromStaking(user, amount);
+    }
+
+    /**
+     * @notice Emergency function to unlock staking tokens if staking contract is broken.
+     * @dev Only callable by owner after 1 year from launch, and only if staking contract is invalid.
+     *      This is a safety mechanism to prevent permanent token lock in case of staking contract failure.
+     * @param user The user whose tokens should be unlocked.
+     */
+    function emergencyUnlockStaking(address user) external onlyOwner {
+        if (block.timestamp <= launchTime + 365 days) revert EMG_WAIT_30D();
+        if (stakingContract != address(0) && _isContract(stakingContract)) revert STAKING_ACTIVE_LOCKS();
+        
+        uint256 locked = lockedForStaking[user];
+        if (locked > 0) {
+            lockedForStaking[user] = 0;
+            totalLockedForStaking -= locked;
+            emit TokensUnlockedFromStaking(user, locked);
+        }
     }
 
     // ============================================
