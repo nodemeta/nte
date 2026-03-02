@@ -28,13 +28,14 @@ pragma solidity 0.8.28;
  * SEC_BOT_ACTIVE   Anti-bot period active
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ DEX & LIQUIDITY [DEX_*]                                                 │
+ * │ DEX & LIQUIDITY [DEX_*, LIQ_*]                                          │
  * └─────────────────────────────────────────────────────────────────────────┘
  * DEX_ROUTER       Router isn't a contract       DEX_PAIR_ZERO      Pair address is zero
  * DEX_FACTORY_ZERO Factory address is zero       DEX_PAIR_FAIL      Failed to set up pair
  * DEX_FACTORY      Factory isn't a contract      DEX_PAIR_CHECK     Pair validation failed
  * DEX_WETH_ZERO    WETH address is zero          DEX_WETH_CALL      WETH call failed
  * DEX_WETH         WETH isn't a contract         DEX_FACTORY_CALL   Factory call failed
+ * LIQ_COLLECTOR_HAS_BALANCE Old collector has pending tokens
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ THE TAX MAN [TAX_*]                                                     │
@@ -665,6 +666,7 @@ contract NTE is IERC20 {
     error STAKING_NOT_CONTRACT();
     error STAKING_ACTIVE_LOCKS();
     error EMG_WAIT_1Y();
+    error LIQ_COLLECTOR_HAS_BALANCE();
 
     /**
      * @dev Sets up the initial state of the NTE token.
@@ -1184,13 +1186,47 @@ contract NTE is IERC20 {
         bool enabled,
         uint256 percentageBps,
         address collector
-    ) external onlyOwner {
+    ) external onlyOwner nonReentrant {
         if (percentageBps > BASIS_POINTS) revert PRICE_INVALID();
+        
+        address oldCollector = liquidityCollector;
+        
         if (enabled) {
             if (collector == address(0)) revert ADDR_ZERO();
             if (!_isContract(collector)) revert ADDR_NOT_CONTRACT();
+            if (percentageBps == 0) revert PRICE_INVALID();
+            
+            // Prevent switching collectors if old collector has pending balance
+            if (oldCollector != address(0) && oldCollector != collector && balanceOf(oldCollector) > 0) {
+                revert LIQ_COLLECTOR_HAS_BALANCE();
+            }
+            
+            // Clean up old collector exemptions if changing to a different collector
+            if (oldCollector != address(0) && oldCollector != collector) {
+                if (taxExempt[oldCollector]) {
+                    taxExempt[oldCollector] = false;
+                    emit TaxExemptUpdated(oldCollector, false);
+                }
+                if (mevProtectionExempt[oldCollector]) {
+                    mevProtectionExempt[oldCollector] = false;
+                    emit MevProtectionExemptUpdated(oldCollector, false);
+                }
+                if (velocityLimitExempt[oldCollector]) {
+                    velocityLimitExempt[oldCollector] = false;
+                    emit VelocityLimitExemptUpdated(oldCollector, false);
+                }
+                if (priceImpactExempt[oldCollector]) {
+                    priceImpactExempt[oldCollector] = false;
+                    emit PriceImpactExemptUpdated(oldCollector, false);
+                }
+                if (isWhitelisted[oldCollector]) {
+                    isWhitelisted[oldCollector] = false;
+                    whitelistExpiry[oldCollector] = 0;
+                    emit WhitelistUpdated(oldCollector, false);
+                }
+            }
 
-            // Ensure liquidity manager transfers are not blocked by tax/protection layers.
+            // Grant all exemptions to new liquidity collector
             if (!taxExempt[collector]) {
                 taxExempt[collector] = true;
                 emit TaxExemptUpdated(collector, true);
@@ -1203,11 +1239,17 @@ contract NTE is IERC20 {
                 velocityLimitExempt[collector] = true;
                 emit VelocityLimitExemptUpdated(collector, true);
             }
-            if (whitelistEnabled && (!isWhitelisted[collector] || whitelistExpiry[collector] != 0)) {
+            if (!priceImpactExempt[collector]) {
+                priceImpactExempt[collector] = true;
+                emit PriceImpactExemptUpdated(collector, true);
+            }
+            if (!isWhitelisted[collector] || whitelistExpiry[collector] != 0) {
                 isWhitelisted[collector] = true;
                 whitelistExpiry[collector] = 0;
                 emit WhitelistUpdated(collector, true);
             }
+        } else {
+            if (collector != address(0) && !_isContract(collector)) revert ADDR_NOT_CONTRACT();
         }
 
         autoLiquidityEnabled = enabled;
