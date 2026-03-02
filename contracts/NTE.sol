@@ -109,6 +109,7 @@ pragma solidity 0.8.28;
  * EMG_INVALID_TOKEN Token address is invalid      EMG_INSUF_BAL_BNB  Not enough BNB
  * EMG_ZERO_RECIP   Recipient is zero address      EMG_BNB_FAIL       BNB transfer failed
  * EMG_INSUF_BAL    Not enough balance            EMG_WAIT_30D       Wait 30 days after launch
+ * EMG_WAIT_1Y     Wait 1 year after launch
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ VELOCITY LIMITS [VEL_*]                                                 │
@@ -663,6 +664,7 @@ contract NTE is IERC20 {
     error DEX_PAIR_NOT_CONTRACT();
     error STAKING_NOT_CONTRACT();
     error STAKING_ACTIVE_LOCKS();
+    error EMG_WAIT_1Y();
 
     /**
      * @dev Sets up the initial state of the NTE token.
@@ -1692,7 +1694,7 @@ contract NTE is IERC20 {
      * @param user The user whose tokens should be unlocked.
      */
     function emergencyUnlockStaking(address user) external onlyOwner {
-        if (block.timestamp <= launchTime + 365 days) revert EMG_WAIT_30D();
+        if (block.timestamp <= launchTime + 365 days) revert EMG_WAIT_1Y();
         if (stakingContract != address(0) && _isContract(stakingContract)) revert STAKING_ACTIVE_LOCKS();
         
         uint256 locked = lockedForStaking[user];
