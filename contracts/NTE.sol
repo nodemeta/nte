@@ -419,6 +419,8 @@ contract NTE is IERC20 {
     uint256 public globalCooldownSeconds;
     /// @notice When a wallet last made a trade
     mapping(address => uint256) internal lastTradeTime;
+    /// @notice Addresses exempt from wallet cooldown enforcement (e.g., exchange hot wallets)
+    mapping(address => bool) internal walletCooldownExempt;
     
     /// @notice Internal guard to prevent "re-entry" attacks
     bool private _entered;
@@ -537,6 +539,8 @@ contract NTE is IERC20 {
     event PriceImpactExemptUpdated(address indexed account, bool exempt);
     /// @notice Emitted when wallet cooldown settings change
     event WalletCooldownConfigUpdated(bool enabled, uint256 cooldownSeconds);
+    /// @notice Emitted when wallet cooldown exemption for an address changes
+    event WalletCooldownExemptUpdated(address indexed account, bool exempt);
     /// @notice Emitted when BNB is received by the contract
     event BNBReceived(address indexed sender, uint256 amount);
     
@@ -1819,6 +1823,23 @@ contract NTE is IERC20 {
         globalCooldownSeconds = cooldownSeconds;
         emit WalletCooldownConfigUpdated(enabled, cooldownSeconds);
     }
+
+    /**
+     * @notice Sets whether an address is exempt from wallet cooldown enforcement.
+     * @dev Exempt addresses (e.g., exchange hot wallets) can send successive transactions
+     *      without waiting for the global cooldown period between each one.
+     *      Reverts with ADDR_INVALID if account is zero address.
+     * @param account The address to grant or revoke cooldown exemption (cannot be zero)
+     * @param exempt True to bypass cooldown checks, false to apply standard cooldown
+     * @custom:access Only callable by contract owner
+     * @custom:usage Grant to: exchange hot wallets, trusted high-frequency infrastructure
+     * @custom:emit WalletCooldownExemptUpdated event
+     */
+    function setWalletCooldownExempt(address account, bool exempt) external onlyOwner {
+        if (account == address(0)) revert ADDR_INVALID();
+        walletCooldownExempt[account] = exempt;
+        emit WalletCooldownExemptUpdated(account, exempt);
+    }
     
     /**
      * @notice Emergency function to withdraw stuck ERC20 tokens from this contract.
@@ -2035,6 +2056,16 @@ contract NTE is IERC20 {
      */
     function isVelocityLimitExempt(address account) external view returns (bool) {
         return velocityLimitExempt[account];
+    }
+
+    /**
+     * @notice Returns whether an address is exempt from wallet cooldown checks.
+     * @param account The address to query
+     * @return exempt True if address bypasses wallet cooldown, false otherwise
+     * @custom:view Read-only function with no state changes
+     */
+    function isWalletCooldownExempt(address account) external view returns (bool) {
+        return walletCooldownExempt[account];
     }
 
     /**
@@ -2730,10 +2761,10 @@ contract NTE is IERC20 {
         
         // Cooldown checks - did you wait long enough since your last move?
         if (walletCooldownEnabled) {
-            if (cachedFromLastTrade != 0 && block.timestamp < cachedFromLastTrade + globalCooldownSeconds) revert CD_SENDER();
+            if (!walletCooldownExempt[from] && cachedFromLastTrade != 0 && block.timestamp < cachedFromLastTrade + globalCooldownSeconds) revert CD_SENDER();
             
             if (!isToPair && to != address(this)) {
-                if (cachedToLastTrade != 0 && block.timestamp < cachedToLastTrade + globalCooldownSeconds) revert CD_RECIPIENT();
+                if (!walletCooldownExempt[to] && cachedToLastTrade != 0 && block.timestamp < cachedToLastTrade + globalCooldownSeconds) revert CD_RECIPIENT();
             }
         }
         
