@@ -1557,13 +1557,8 @@ contract NTE is IERC20 {
      *      - Percentage must be 1-10000 basis points (0.01%-100%)
      *      - When switching collectors, old collector must have zero balance
      *      
-     *      **Exemption management:**
-     *      When changing collectors, automatically:
-     *      1. Removes ALL exemptions from old collector (tax, MEV, velocity, price impact, whitelist)
-     *      2. Grants ALL exemptions to new collector for smooth operation
-     *      
-     *      This ensures liquidity manager can operate freely without restrictions while
-     *      preventing abandoned collectors from retaining privileged status.
+     *      The collector must separately be granted helperBypass via setHelperBypass()
+     *      to allow it to move its own tokens freely without trading protections or taxes.
      *      
      *      Reverts with PRICE_INVALID if percentageBps > 10000 or equals 0 when enabling,
      *      ADDR_ZERO if collector is zero when enabling,
@@ -1573,86 +1568,35 @@ contract NTE is IERC20 {
      * @param percentageBps Percentage of tax to route to collector in basis points (100 = 1%, 3000 = 30%)
      * @param collector Address of liquidity manager contract (must be contract, not EOA)
      * @custom:access Only callable by contract owner
-     * @custom:reentrancy Protected by nonReentrant modifier to prevent reentrancy attacks
-     * @custom:exemptions Automatically grants all protections to collector (tax, MEV, velocity, price impact, whitelist)
+     * @custom:bypass Collector must have helperBypass set via setHelperBypass() to operate freely
      * @custom:migration When switching collectors, old collector must withdraw all tokens first
      * @custom:usage Ideal for: auto-liquidity, buyback-and-LP, protocol-owned liquidity (POL)
-     * @custom:emit AutoLiquidityConfigUpdated and multiple exemption events during setup
+     * @custom:emit AutoLiquidityConfigUpdated event
      */
     function configureAutoLiquidity(
         bool enabled,
         uint256 percentageBps,
         address collector
-    ) external onlyOwner nonReentrant {
-        if (percentageBps > BASIS_POINTS) revert PRICE_INVALID();
-        
-        address oldCollector = liquidityCollector;
-        
-        if (enabled) {
-            if (collector == address(0)) revert ADDR_ZERO();
-            if (!_isContract(collector)) revert ADDR_NOT_CONTRACT();
-            if (percentageBps == 0) revert PRICE_INVALID();
-            
-            // Prevent switching collectors if old collector has pending balance
-            if (oldCollector != address(0) && oldCollector != collector && balanceOf(oldCollector) > 0) {
-                revert LIQ_COLLECTOR_HAS_BALANCE();
-            }
-            
-            // Clean up old collector exemptions if changing to a different collector
-            if (oldCollector != address(0) && oldCollector != collector) {
-                if (taxExempt[oldCollector]) {
-                    taxExempt[oldCollector] = false;
-                    emit TaxExemptUpdated(oldCollector, false);
-                }
-                if (mevProtectionExempt[oldCollector]) {
-                    mevProtectionExempt[oldCollector] = false;
-                    emit MevProtectionExemptUpdated(oldCollector, false);
-                }
-                if (velocityLimitExempt[oldCollector]) {
-                    velocityLimitExempt[oldCollector] = false;
-                    emit VelocityLimitExemptUpdated(oldCollector, false);
-                }
-                if (priceImpactExempt[oldCollector]) {
-                    priceImpactExempt[oldCollector] = false;
-                    emit PriceImpactExemptUpdated(oldCollector, false);
-                }
-                if (isWhitelisted[oldCollector]) {
-                    isWhitelisted[oldCollector] = false;
-                    whitelistExpiry[oldCollector] = 0;
-                    emit WhitelistUpdated(oldCollector, false);
-                }
-            }
-
-            // Grant all exemptions to new liquidity collector
-            if (!taxExempt[collector]) {
-                taxExempt[collector] = true;
-                emit TaxExemptUpdated(collector, true);
-            }
-            if (!mevProtectionExempt[collector]) {
-                mevProtectionExempt[collector] = true;
-                emit MevProtectionExemptUpdated(collector, true);
-            }
-            if (!velocityLimitExempt[collector]) {
-                velocityLimitExempt[collector] = true;
-                emit VelocityLimitExemptUpdated(collector, true);
-            }
-            if (!priceImpactExempt[collector]) {
-                priceImpactExempt[collector] = true;
-                emit PriceImpactExemptUpdated(collector, true);
-            }
-            if (!isWhitelisted[collector] || whitelistExpiry[collector] != 0) {
-                isWhitelisted[collector] = true;
-                whitelistExpiry[collector] = 0;
-                emit WhitelistUpdated(collector, true);
-            }
-        } else {
-            if (collector != address(0) && !_isContract(collector)) revert ADDR_NOT_CONTRACT();
+    ) external onlyOwner {
+        if (!enabled) {
+            autoLiquidityEnabled = false;
+            emit AutoLiquidityConfigUpdated(false, autoLiquidityBps, liquidityCollector);
+            return;
         }
 
-        autoLiquidityEnabled = enabled;
+        if (percentageBps == 0 || percentageBps > BASIS_POINTS) revert PRICE_INVALID();
+        if (collector == address(0)) revert ADDR_ZERO();
+        if (!_isContract(collector)) revert ADDR_NOT_CONTRACT();
+
+        address oldCollector = liquidityCollector;
+        if (oldCollector != address(0) && oldCollector != collector && balanceOf(oldCollector) > 0) {
+            revert LIQ_COLLECTOR_HAS_BALANCE();
+        }
+
+        autoLiquidityEnabled = true;
         autoLiquidityBps = percentageBps;
         liquidityCollector = collector;
-        emit AutoLiquidityConfigUpdated(enabled, percentageBps, collector);
+        emit AutoLiquidityConfigUpdated(true, percentageBps, collector);
     }
     
     /**
@@ -1939,7 +1883,21 @@ contract NTE is IERC20 {
 
     /**
      * @notice Configures MEV (Miner Extractable Value) protection settings.
-     * @dev MEV protection prevents sandwich attacks and block manipulation by limiting\n     *      how frequently an address can trade. Two independent checks:\n     *      1. Block-based: Prevents trading in consecutive blocks (maxBlocks)\n     *      2. Time-based: Enforces minimum seconds between trades (minTime)\n     *      At least one parameter must be non-zero when enabling protection.\n     *      Reverts with MEV_CONFIG_INVALID if both are 0 when enabled,\n     *      MEV_BLOCKS_HIGH if maxBlocks exceeds MAX_MEV_BLOCKS,\n     *      or MEV_TIME_HIGH if minTime exceeds MAX_MEV_MIN_TIME.\n     * @param enabled True to activate MEV protection, false to disable\n     * @param maxBlocks Max blocks allowed between trades (0 = disabled, typical: 2-5)\n     * @param minTime Min seconds required between trades (0 = disabled, typical: 3-30)\n     * @custom:access Only callable by contract owner\n     * @custom:protection Prevents sandwich attacks, front-running, and block manipulation\n     * @custom:emit MevProtectionConfigured and optionally MevProtectionToggled events\n     */
+     * @dev MEV protection prevents sandwich attacks and block manipulation by limiting
+     *      how frequently an address can trade. Two independent checks:
+     *      1. Block-based: Prevents trading in consecutive blocks (maxBlocks)
+     *      2. Time-based: Enforces minimum seconds between trades (minTime)
+     *      At least one parameter must be non-zero when enabling protection.
+     *      Reverts with MEV_CONFIG_INVALID if both are 0 when enabled,
+     *      MEV_BLOCKS_HIGH if maxBlocks exceeds MAX_MEV_BLOCKS,
+     *      or MEV_TIME_HIGH if minTime exceeds MAX_MEV_MIN_TIME.
+     * @param enabled True to activate MEV protection, false to disable
+     * @param maxBlocks Max blocks allowed between trades (0 = disabled, typical: 2-5)
+     * @param minTime Min seconds required between trades (0 = disabled, typical: 3-30)
+     * @custom:access Only callable by contract owner
+     * @custom:protection Prevents sandwich attacks, front-running, and block manipulation
+     * @custom:emit MevProtectionConfigured and optionally MevProtectionToggled events
+     */
     function setMevProtectionConfig(bool enabled, uint256 maxBlocks, uint256 minTime) external onlyOwner {
         // When enabling protection, at least one of the parameters must be non-zero
         if (enabled && maxBlocks == 0 && minTime == 0) revert MEV_CONFIG_INVALID();
