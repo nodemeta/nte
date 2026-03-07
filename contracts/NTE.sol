@@ -19,6 +19,7 @@ pragma solidity 0.8.28;
  * AUTH_LOCKED      Ownership lock active (30d)  AUTH_SAME_OWNER    Already the current owner
  * AUTH_INVALID     Invalid auth signer key       AUTH_ALREADY_SET   Signer is already authorized
  * AUTH_NOT_SET     Signer isn't authorized       AUTH_ZERO_ADDR     Signer can't be zero address
+ * AUTH_KEEPER      Caller is not a trusted keeper
  * AUTH_NOT_PENDING_OWNER  Not the pending owner  AUTH_NO_PENDING_TRANSFER  No pending ownership transfer
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
@@ -35,7 +36,8 @@ pragma solidity 0.8.28;
  * DEX_FACTORY      Factory isn't a contract      DEX_PAIR_CHECK     Pair validation failed
  * DEX_WETH_ZERO    WETH address is zero          DEX_WETH_CALL      WETH call failed
  * DEX_WETH         WETH isn't a contract         DEX_FACTORY_CALL   Factory call failed
- * DEX_PAIR_NOT_CONTRACT Pair isn't a contract
+ * DEX_PAIR_NOT_CONTRACT Pair isn't a contract    DEX_PAIR_NOT_FROM_FACTORY Pair not from trusted factory
+ * DEX_PAIR_NO_NTE  Pair doesn't contain NTE
  * LIQ_COLLECTOR_HAS_BALANCE Old collector has pending tokens
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
@@ -155,6 +157,7 @@ interface IPancakePair {
     function getReserves() external view returns (uint112 reserve0, uint112 reserve1, uint32 blockTimestampLast);
     function token0() external view returns (address);
     function token1() external view returns (address);
+    function factory() external view returns (address);
 }
 
 /// @title PancakeSwap Factory Interface
@@ -326,6 +329,12 @@ contract NTE is IERC20 {
     address public pancakePair;
     /// @notice A list of addresses we treat as DEX pools
     mapping(address => bool) public isPancakePair;
+    /// @notice Factories whose pairs may be registered by trusted keepers
+    mapping(address => bool) public trustedFactory;
+    /// @notice Routers excluded from transfer-tax branch to prevent DEX operation double taxation
+    mapping(address => bool) public trustedRouters;
+    /// @notice Keepers authorized to register new NTE pairs from trusted factories
+    mapping(address => bool) public trustedKeepers;
     
     /// @notice Counter for all tokens ever sent to the burn address
     uint256 public totalBurned;
@@ -588,6 +597,12 @@ contract NTE is IERC20 {
     event WhitelistExpirySet(address indexed account, uint256 expiryTime);
     /// @notice Emitted when a DEX pair status is added or removed
     event DexPairUpdated(address indexed pair, bool isPair);
+    /// @notice Emitted when a factory's trusted status is updated
+    event TrustedFactoryUpdated(address indexed factory, bool trusted);
+    /// @notice Emitted when a router's trusted status is updated
+    event TrustedRouterUpdated(address indexed router, bool trusted);
+    /// @notice Emitted when a keeper's trusted status is updated
+    event TrustedKeeperUpdated(address indexed keeper, bool trusted);
     /// @notice Emitted when emergency token withdrawal occurs
     event EmergencyTokenWithdraw(address indexed token, address indexed to, uint256 amount);
     /// @notice Emitted when emergency BNB withdrawal occurs
@@ -614,6 +629,12 @@ contract NTE is IERC20 {
         if (msg.sender != _owner) revert AUTH_OWNER();
         _;
     }
+
+    /// @notice Restricts function access to trusted keeper accounts
+    modifier onlyTrustedKeeper() {
+        if (!trustedKeepers[msg.sender]) revert AUTH_KEEPER();
+        _;
+    }
     
     /// @notice Simple reentrancy guard modifier
     modifier nonReentrant() {
@@ -631,6 +652,8 @@ contract NTE is IERC20 {
     error SEC_REENTRY();
     /// @notice Thrown when caller is not the contract owner
     error AUTH_OWNER();
+    /// @notice Thrown when caller is not an approved trusted keeper
+    error AUTH_KEEPER();
     /// @notice Thrown when attempting to set owner to zero address
     error AUTH_ZERO_OWNER();
     /// @notice Thrown when ownership action attempted during 30-day lock period
@@ -669,6 +692,10 @@ contract NTE is IERC20 {
     error DEX_FACTORY_CALL();
     /// @notice Thrown when pair address is not a contract
     error DEX_PAIR_NOT_CONTRACT();
+    /// @notice Thrown when pair was not created by a trusted factory
+    error DEX_PAIR_NOT_FROM_FACTORY();
+    /// @notice Thrown when pair does not contain the NTE token
+    error DEX_PAIR_NO_NTE();
     
     /// @notice Thrown when buy tax exceeds 25% (2500 basis points)
     error TAX_BUY_HIGH();
@@ -893,7 +920,8 @@ contract NTE is IERC20 {
             if (!_isContract(_pancakeRouter)) revert DEX_ROUTER();
             _initializeDexPair(_pancakeRouter);
             pancakeRouter = _pancakeRouter;
-            // Router is NOT tax exempt to prevent arbitrage through direct router calls
+            trustedRouters[_pancakeRouter] = true;
+            // Router allowlist controls transfer-tax exclusion for DEX operations.
         }
         
         maxSellPercentage = 100;
@@ -911,6 +939,9 @@ contract NTE is IERC20 {
         
         // Initialize tax change cooldown to deployment time
         _lastTaxChangeTime = block.timestamp;
+
+        // Owner starts as an approved keeper for pair registration operations.
+        trustedKeepers[initialOwner] = true;
         
         _mint(initialOwner, initialSupply * 10 ** _decimals);
     }
@@ -1306,14 +1337,15 @@ contract NTE is IERC20 {
      * @notice Returns a comprehensive snapshot of the current tax configuration and exemptions.
      * @dev Provides all tax-related settings in a single call for efficient frontend integration.
      *      Tax rates are returned in basis points where 100 = 1%, 1000 = 10%, etc.
-     *      Router and pair exemption status indicates whether these critical addresses
-     *      bypass tax collection (typically router is NOT exempt, pair is NOT exempt).
+      *      Router trust status indicates whether active Pancake router is in the
+      *      trustedRouters allowlist used for router-based transfer-tax exclusion.
+      *      Pair exemption status reflects taxExempt setting for the main pair.
      *      This function is gas-efficient for dashboards and UI displaying tax info.
      * @return buyTax Buy transaction tax rate in basis points (0-2500, typically 200 = 2%)
      * @return sellTax Sell transaction tax rate in basis points (0-2500, typically 200 = 2%)
      * @return transferTax Wallet-to-wallet transfer tax rate in basis points (0-2500, typically 300 = 3%)
      * @return treasuryAddr The destination address receiving all collected tax proceeds
-     * @return routerExempt True if PancakeSwap router bypasses taxes (typically false)
+      * @return routerExempt True if active Pancake router is trusted for transfer-tax exclusion
      * @return pairExempt True if main liquidity pair bypasses taxes (typically false)
      * @custom:view Read-only aggregation function with no state modifications
      * @custom:usage Ideal for frontend tax calculators, dashboards, and transaction previews
@@ -1332,7 +1364,7 @@ contract NTE is IERC20 {
             sellTaxBps,
             transferTaxBps,
             treasury,
-            taxExempt[pancakeRouter],
+            trustedRouters[pancakeRouter],
             taxExempt[pancakePair]
         );
     }
@@ -2237,22 +2269,119 @@ contract NTE is IERC20 {
     }
 
     /**
+     * @notice Marks a DEX factory as trusted or untrusted for keeper-driven pair registration.
+     * @dev Trusted factories are valid sources when a trusted keeper calls registerPairFromFactory().
+     *      Typically set to the PancakeSwap V2/V3 factory addresses on BSC.
+     *      Reverts with ADDR_INVALID if factory is zero address,
+     *      or DEX_FACTORY if address is not a contract.
+     * @param factory The factory contract address to configure
+     * @param trusted True to allow pairs from this factory to be keeper-registered, false to revoke
+     * @custom:access Only callable by contract owner
+     * @custom:emit TrustedFactoryUpdated event
+     */
+    function setTrustedFactory(address factory, bool trusted) external onlyOwner {
+        if (factory == address(0)) revert ADDR_INVALID();
+        if (trusted && !_isContract(factory)) revert DEX_FACTORY();
+        trustedFactory[factory] = trusted;
+        emit TrustedFactoryUpdated(factory, trusted);
+    }
+
+    /**
+     * @notice Marks a router as trusted or untrusted for router-based tax exclusion.
+     * @dev Trusted routers are excluded from the transfer-tax branch in _calculateTax,
+     *      which prevents double taxation during liquidity provisioning and similar
+     *      router-mediated DEX operations.
+     *      Reverts with ADDR_INVALID if router is zero address,
+     *      or DEX_ROUTER if enabling trust for a non-contract address.
+     * @param router Router contract address to configure
+     * @param trusted True to trust router for exclusion, false to revoke
+     * @custom:access Only callable by contract owner
+     * @custom:emit TrustedRouterUpdated event
+     */
+    function setTrustedRouter(address router, bool trusted) external onlyOwner {
+        if (router == address(0)) revert ADDR_INVALID();
+        if (trusted && !_isContract(router)) revert DEX_ROUTER();
+        trustedRouters[router] = trusted;
+        emit TrustedRouterUpdated(router, trusted);
+    }
+
+    /**
+     * @notice Sets a keeper address as trusted or untrusted for pair registration operations.
+     * @dev Trusted keepers are allowed to call registerPairFromFactory().
+     *      Reverts with ADDR_INVALID if keeper is zero address.
+     * @param keeper Keeper wallet address used by monitoring/ops automation
+     * @param trusted True to authorize keeper, false to revoke authorization
+     * @custom:access Only callable by contract owner
+     * @custom:emit TrustedKeeperUpdated event
+     */
+    function setTrustedKeeper(address keeper, bool trusted) external onlyOwner {
+        if (keeper == address(0)) revert ADDR_INVALID();
+        trustedKeepers[keeper] = trusted;
+        emit TrustedKeeperUpdated(keeper, trusted);
+    }
+
+    /**
+     * @notice Registers a newly created DEX pair that contains NTE.
+     * @dev Callable only by trusted keepers (e.g., monitoring wallets). Three on-chain checks
+     *      provide validation before pair registration:
+     *      1. The pair must be a deployed contract.
+     *      2. The pair's factory() must be in the trustedFactory mapping.
+     *      3. One of the pair's tokens must be this NTE contract.
+     *      Silently succeeds (no revert) if the pair is already registered, so bots can
+     *      safely call without pre-checking.
+     *      Reverts with DEX_PAIR_NOT_CONTRACT if pair is not a contract,
+     *      DEX_PAIR_NOT_FROM_FACTORY if factory is not trusted,
+     *      or DEX_PAIR_NO_NTE if neither token in the pair is NTE.
+     * @param pair The liquidity pair contract address to register
+     * @custom:access Only callable by trusted keepers
+     * @custom:monitoring Designed for use by off-chain watchers listening to factory PairCreated events
+     * @custom:emit DexPairUpdated event (only when state changes)
+     */
+    function registerPairFromFactory(address pair) external onlyTrustedKeeper {
+        if (!_isContract(pair)) revert DEX_PAIR_NOT_CONTRACT();
+        if (isPancakePair[pair]) return; // already registered, nothing to do
+
+        address pairFactory = IPancakePair(pair).factory();
+        if (!trustedFactory[pairFactory]) revert DEX_PAIR_NOT_FROM_FACTORY();
+
+        address t0 = IPancakePair(pair).token0();
+        address t1 = IPancakePair(pair).token1();
+        if (t0 != address(this) && t1 != address(this)) revert DEX_PAIR_NO_NTE();
+
+        isPancakePair[pair] = true;
+        emit DexPairUpdated(pair, true);
+    }
+
+    /**
      * @notice Sets the PancakeSwap router address for DEX integration.
      * @dev Updates the stored PancakeSwap router used for AMM operations and pair detection.
      *      This provides a recovery mechanism if router wasn't properly set during deployment
      *      or needs to be updated to a new router version.
+     *      Automatically keeps the active Pancake router trusted for router-based tax exclusion,
+     *      and removes trust from the previous Pancake router when switching.
      *      Reverts with ADDR_ZERO if router is zero address,
      *      or DEX_ROUTER if address is not a contract.
      * @param _pancakeRouter The PancakeSwap router contract address (must be valid contract)
      * @custom:access Only callable by contract owner
      * @custom:usage Update when migrating to new DEX version or fixing deployment issues
-     * @custom:emit PancakeRouterUpdated event
+     * @custom:emit PancakeRouterUpdated and TrustedRouterUpdated events
      */
     function setPancakeRouter(address _pancakeRouter) external onlyOwner {
         if (_pancakeRouter == address(0)) revert ADDR_ZERO();
         if (!_isContract(_pancakeRouter)) revert DEX_ROUTER();
-        
+
+        address previousRouter = pancakeRouter;
+        if (previousRouter != address(0) && previousRouter != _pancakeRouter && trustedRouters[previousRouter]) {
+            trustedRouters[previousRouter] = false;
+            emit TrustedRouterUpdated(previousRouter, false);
+        }
+
         pancakeRouter = _pancakeRouter;
+        if (!trustedRouters[_pancakeRouter]) {
+            trustedRouters[_pancakeRouter] = true;
+            emit TrustedRouterUpdated(_pancakeRouter, true);
+        }
+
         emit PancakeRouterUpdated(_pancakeRouter);
     }
 
@@ -2768,7 +2897,7 @@ contract NTE is IERC20 {
             }
         }
         
-        if (priceImpactLimitEnabled && isToPair && !priceImpactExempt[from] && pancakeRouter != address(0)) {
+        if (priceImpactLimitEnabled && isToPair && !priceImpactExempt[from]) {
             uint256 priceImpact = _calculatePriceImpact(amount, to);
             if (priceImpact > maxPriceImpactPercent) revert PRICE_TOO_HIGH();
         }
@@ -2846,10 +2975,11 @@ contract NTE is IERC20 {
      *      2. **Sell**: user wallet → DEX pair = sellTaxBps (e.g., 200 = 2%)
      *      3. **Arbitrage**: DEX pair → DEX pair = sellTaxBps (higher tax on arb bots)
      *      4. **P2P Transfer**: wallet → wallet = transferTaxBps (e.g., 300 = 3%)
-     *      5. **Router Transactions**: Excludes router to prevent double taxation during swaps
+    *      5. **Trusted Router Transactions**: Excludes trusted routers to prevent
+    *         double taxation during liquidity and router-mediated DEX operations
      *      
      *      **Special Cases:**
-     *      - Router as from/to: Returns 0 tax to avoid double taxation on DEX operations
+    *      - Trusted router as from/to: Returns 0 tax to avoid double taxation on DEX operations
      *      - Tax rate 0: Returns 0 immediately (no tax applied)
      *      - Overflow protection: Validates multiplication won't overflow before calculation
      *      
@@ -2858,11 +2988,11 @@ contract NTE is IERC20 {
      *      Where BASIS_POINTS = 10000, so 200 bps = 2%
      *      
      *      Reverts with TXN_OVERFLOW if amount × taxBps would overflow uint256.
-     * @param from Sender address (checked against isPancakePair and pancakeRouter)
-     * @param to Recipient address (checked against isPancakePair and pancakeRouter)
+    * @param from Sender address (checked against isPancakePair and trustedRouters)
+    * @param to Recipient address (checked against isPancakePair and trustedRouters)
      * @param amount Base transfer amount before tax deduction (in token base units with 18 decimals)
      * @return taxAmount The calculated tax amount in tokens (0 if no tax applicable)
-     * @custom:classification Uses isPancakePair mapping to identify DEX transactions
+    * @custom:classification Uses isPancakePair and trustedRouters mappings for classification
      * @custom:safety Overflow protection prevents arithmetic overflow on large amounts
      * @custom:precision Uses basis points for sub-percent tax precision (0.01% increments)
      */
@@ -2878,8 +3008,8 @@ contract NTE is IERC20 {
         } else if (isPancakePair[from] && isPancakePair[to]) {
             // Pool-to-pool move (usually arbitrage)
             taxBps = sellTaxBps;
-        } else if (pancakeRouter != from && pancakeRouter != to) {
-            // Regular P2P transfer (exclude router to prevent double taxation)
+        } else if (!trustedRouters[from] && !trustedRouters[to]) {
+            // Regular P2P transfer (exclude trusted routers to prevent double taxation)
             taxBps = transferTaxBps;
         }
         
@@ -2898,16 +3028,16 @@ contract NTE is IERC20 {
      * @dev Internal function to calculate price impact of a token sale using AMM mathematics.
      *      Uses the constant product formula (x + dx)(y - dy) = xy to determine how much
      *      the sale will move the price. Accounts for both sell tax and DEX fee (0.25%).
-     *      Returns BASIS_POINTS (100%) if reserves are invalid or router not set.
+     *      Returns BASIS_POINTS (100%) if reserves are invalid.
      * @param amount The amount of tokens being sold (before tax)
      * @param pair The liquidity pair address to calculate impact against
      * @return impact The price impact in basis points where 100 = 1%, max 10000 = 100%
      * @custom:formula outputImpact = (idealOutput - actualOutput) / idealOutput * BASIS_POINTS
      * @custom:assumptions Factors in sellTaxBps and DEX_FEE_BPS (25 = 0.25%) before calculation
-     * @custom:safety Returns 0 if router/pair not set, returns BASIS_POINTS if reserves are zero
+     * @custom:safety Returns 0 if pair/amount is invalid, returns BASIS_POINTS if reserves are zero
      */
     function _calculatePriceImpact(uint256 amount, address pair) internal view returns (uint256 impact) {
-        if (pancakeRouter == address(0) || pair == address(0) || amount == 0) return 0;
+        if (pair == address(0) || amount == 0) return 0;
 
         (uint256 reserve0, uint256 reserve1, ) = IPancakePair(pair).getReserves();
         
