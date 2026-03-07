@@ -296,21 +296,31 @@ contract NTECategoryHelper {
     }
 
     /**
-     * @notice Generic categorized transfer with custom metadata and optional authorization.
+     * @notice Generic categorized transfer with custom metadata and backend authorization.
      * @dev Forwards the call to NTE.transactionFrom() for processing.
      *      All tax logic, protections, and balance management happen in the NTE contract.
      *      This helper simply provides a user-friendly interface.
+     *
+     *      **Prerequisites (all required — no parameter is optional):**
+     *      1. Caller must call NTE.approve(helperAddress, amount) before this call.
+     *      2. An authorized backend signer (registered via NTE.addAuthSigner) must sign the
+     *         payload: (nteAddress, from, to, amount, category, txReference, nonce, deadline, chainId).
+     *      3. `nonce` must equal the caller's current NTE.userCategorizedNonce(msg.sender).
+     *      4. `deadline` must be a future Unix timestamp — passing 0 always reverts (SIG_EXPIRED).
+     *      5. `signature` must be the 65-byte ECDSA signature from the authorized signer —
+     *         passing empty bytes always reverts (AUTH_ZERO_ADDR → AUTH_INVALID).
+     *
      * @param to The recipient address.
      * @param amount The number of NTE tokens to transfer.
-     * @param category The transaction category code (0-255) for off-chain categorization.
-     * @param signature Optional EIP-712 signature for authorized/delegated transfers (empty bytes for none).
-     * @param nonce Nonce for signature replay protection (0 if no signature).
-     * @param deadline Unix timestamp after which signature expires (0 if no signature).
+     * @param category The transaction category code (must be enabled in NTE; checked on-chain).
+     * @param signature 65-byte ECDSA signature from an NTE-authorized signer. Always required.
+     * @param nonce Current value of NTE.userCategorizedNonce(msg.sender). Must match exactly.
+     * @param deadline Future Unix timestamp after which the signature expires. Must be > block.timestamp.
      * @param txReference Optional external transaction/order reference ID (e.g., invoice number).
      * @param memo Optional human-readable memo or description.
      * @return True if the transfer succeeds.
-     * @custom:example Transaction(recipient, 100e18, 1, "", 0, 0, "INV-2026-001", "Equipment purchase")
-     * @custom:security Actual authorization, tax, and anti-bot logic handled by NTE contract.
+     * @custom:example Transaction(recipient, 100e18, 1, sig, currentNonce, block.timestamp + 300, "INV-2026-001", "Equipment purchase")
+     * @custom:security Signature, nonce, and deadline are all mandatory. Passing zero/empty values will revert.
      * @custom:usecase Generic categorized transfer when named aliases (Payment, Reward, etc.) don't fit.
      */
     function Transaction(
