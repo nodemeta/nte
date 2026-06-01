@@ -11,16 +11,19 @@ pragma solidity 0.8.28;
  * ERROR CODES - Making Sense of Reverts
  * ═══════════════════════════════════════════════════════════════════════════
  * We use descriptive prefixes so you know exactly why a transaction failed.
- *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ PERMISSIONS & OWNERSHIP [AUTH_*]                                        │
  * └─────────────────────────────────────────────────────────────────────────┘
- * AUTH_OWNER       Only the owner can do this   AUTH_ZERO_OWNER    Owner can't be zero address
- * AUTH_LOCKED      Ownership lock active (30d)  AUTH_SAME_OWNER    Already the current owner
- * AUTH_INVALID     Invalid auth signer key       AUTH_ALREADY_SET   Signer is already authorized
- * AUTH_NOT_SET     Signer isn't authorized       AUTH_ZERO_ADDR     Signer can't be zero address
- * AUTH_KEEPER      Caller is not a trusted keeper
- * AUTH_NOT_PENDING_OWNER  Not the pending owner  AUTH_NO_PENDING_TRANSFER  No pending ownership transfer
+ * AUTH_ZERO_OWNER  Owner can't be zero address  AUTH_KEEPER        Caller is not a trusted keeper
+ * AUTH_INVALID     Invalid role or signature    AUTH_ALREADY_SET   Signer is already authorized
+ * AUTH_NOT_SET     Signer isn't authorized      AUTH_ZERO_ADDR     Signer can't be zero address
+ * 
+ * ┌─────────────────────────────────────────────────────────────────────────┐
+ * │ TIMELOCK & GOVERNANCE [TIMELOCK_*]                                      │
+ * └─────────────────────────────────────────────────────────────────────────┘
+ * TIMELOCK_ALREADY_QUEUED Action already queued  TIMELOCK_NOT_QUEUED Action not queued
+ * TIMELOCK_NOT_READY     Action not ready yet    TIMELOCK_EXPIRED   Action has expired
+ * TIMELOCK_CALL_FAILED   Target call failed
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ SYSTEM & SECURITY [SYS_*, SEC_*]                                        │
@@ -34,9 +37,8 @@ pragma solidity 0.8.28;
  * DEX_ROUTER       Router isn't a contract       DEX_PAIR_ZERO      Pair address is zero
  * DEX_FACTORY_ZERO Factory address is zero       DEX_PAIR_FAIL      Failed to set up pair
  * DEX_FACTORY      Factory isn't a contract      DEX_PAIR_CHECK     Pair validation failed
- * DEX_WETH_ZERO    WETH address is zero          DEX_WETH_CALL      WETH call failed
- * DEX_WETH         WETH isn't a contract         DEX_FACTORY_CALL   Factory call failed
- * DEX_PAIR_NOT_CONTRACT Pair isn't a contract    DEX_PAIR_NOT_FROM_FACTORY Pair not from trusted factory
+ * DEX_WETH_ZERO    WETH address is zero          DEX_PAIR_NOT_CONTRACT Pair isn't a contract
+ * DEX_WETH         WETH isn't a contract         DEX_PAIR_NOT_FROM_FACTORY Pair not from trusted factory
  * DEX_PAIR_NO_NTE  Pair doesn't contain NTE
  * LIQ_COLLECTOR_HAS_BALANCE Old collector has pending tokens
  *
@@ -111,9 +113,8 @@ pragma solidity 0.8.28;
  * └─────────────────────────────────────────────────────────────────────────┘
  * EMG_TRANSFER_FAIL Token transfer failed         EMG_INVALID_RECIP  Recipient is invalid
  * EMG_INVALID_TOKEN Token address is invalid      EMG_INSUF_BAL_BNB  Not enough BNB
- * EMG_ZERO_RECIP   Recipient is zero address      EMG_BNB_FAIL       BNB transfer failed
- * EMG_INSUF_BAL    Not enough balance            EMG_WAIT_30D       Wait 30 days after launch
- * EMG_WAIT_1Y     Wait 1 year after launch
+ * EMG_INSUF_BAL    Not enough balance            EMG_BNB_FAIL       BNB transfer failed
+ * EMG_WAIT_30D     Wait 30 days after launch
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ VELOCITY LIMITS [VEL_*]                                                 │
@@ -295,11 +296,31 @@ contract NTE is IERC20 {
     uint256 private _totalSupply;
     
     /// @notice The current captain of the contract
-    address private _owner;
-    
-    /// @notice The pending owner waiting to accept ownership
-    address private _pendingOwner;
-    
+    address private _owner;    // Zero-Trust Role Management State
+    /// @notice The role hash for the Governance role (controls high-risk parameters via timelock)
+    bytes32 public constant GOVERNANCE_ROLE = keccak256("GOVERNANCE_ROLE");
+    /// @notice The role hash for the Treasury role (controls token mechanics)
+    bytes32 public constant TREASURY_ROLE = keccak256("TREASURY_ROLE");
+    /// @notice The role hash for the Emergency role (controls instant circuit breaker and pausing)
+    bytes32 public constant EMERGENCY_ROLE = keccak256("EMERGENCY_ROLE");
+    /// @notice The role hash for the Security role (controls security parameters, blacklists, whitelists)
+    bytes32 public constant SECURITY_ROLE = keccak256("SECURITY_ROLE");
+
+    mapping(bytes32 => mapping(address => bool)) public hasRole;    // Timelock Engine State
+    /// @notice The delay period for timelocked transactions (48 hours)
+    uint256 public constant TIMELOCK_DELAY = 48 hours;
+    /// @notice The grace period for executing timelocked transactions (7 days)
+    uint256 public constant TIMELOCK_GRACE_PERIOD = 7 days;
+    /// @notice Timelock execution queue mapping (actionHash => execution timestamp)
+    mapping(bytes32 => uint256) public timelockQueue;
+
+    // Sentry & Circuit Breaker State
+    /// @notice The vault address where emergency native and token funds are recovered
+    address public immutable emergencyRescueVault;
+    uint256 public circuitBreakerThresholdBps; // e.g. 500 = 5%
+    mapping(address => bool) public circuitBreakerExempt;
+
+
     /// @notice A master switch to stop all transfers if something goes wrong
     bool private _paused;
     
@@ -509,23 +530,50 @@ contract NTE is IERC20 {
      */
     mapping(address => bool) internal velocityLimitExempt;
 
-    /// @notice The staking contract allowed to lock balances
-    address public stakingContract;
     /// @notice Whether helper-bypass transfers must satisfy whitelist checks when whitelist mode is enabled
-    bool public enforceWhitelistOnHelper = true;
-    /// @notice Amount of tokens locked in staking per user
-    mapping(address => uint256) public lockedForStaking;
-    /// @notice Aggregate amount currently locked for staking across all users
-    uint256 public totalLockedForStaking;
-
-    // ===================================================
+    bool public enforceWhitelistOnHelper = true;    // ===================================================
     // EVENTS
     // ===================================================
     
     /// @notice Emitted when contract ownership changes
+    /// @param previousOwner The previous owner of the contract
+    /// @param newOwner The new owner of the contract
     event OwnershipTransferred(address indexed previousOwner, address indexed newOwner);
-    /// @notice Emitted when ownership transfer is initiated
-    event OwnershipTransferStarted(address indexed previousOwner, address indexed newOwner);
+    
+    // Zero-Trust & Security Events
+    /// @notice Emitted when a role is granted to an account
+    /// @param role The role hash being granted
+    /// @param account The address receiving the role
+    /// @param sender The address that granted the role
+    event RoleGranted(bytes32 indexed role, address indexed account, address indexed sender);
+    /// @notice Emitted when a role is revoked from an account
+    /// @param role The role hash being revoked
+    /// @param account The address losing the role
+    /// @param sender The address that revoked the role
+    event RoleRevoked(bytes32 indexed role, address indexed account, address indexed sender);
+    /// @notice Emitted when an action is queued in the timelock
+    /// @param actionHash The hash of the target call payload
+    /// @param eta The timestamp after which the action can be executed
+    event ActionQueued(bytes32 indexed actionHash, uint256 eta);
+    /// @notice Emitted when an action is executed in the timelock
+    /// @param actionHash The hash of the target call payload
+    event ActionExecuted(bytes32 indexed actionHash);
+    /// @notice Emitted when an action is canceled in the timelock
+    /// @param actionHash The hash of the target call payload
+    event ActionCanceled(bytes32 indexed actionHash);
+    /// @notice Emitted when the circuit breaker threshold is changed
+    /// @param newThresholdBps The new circuit breaker threshold in basis points
+    event CircuitBreakerThresholdUpdated(uint256 newThresholdBps);
+    /// @notice Emitted when an account's circuit breaker exemption status is changed
+    /// @param account The address receiving or losing the exemption
+    /// @param exempt True if the account is exempt, false otherwise
+    event CircuitBreakerExemptionUpdated(address indexed account, bool exempt);
+    /// @notice Emitted when the circuit breaker triggers self-defense
+    /// @param sender The address that triggered the circuit breaker
+    /// @param amount The transaction amount that exceeded the threshold
+    /// @param threshold The threshold amount that was exceeded
+    event CircuitBreakerTripped(address indexed sender, uint256 amount, uint256 threshold);
+
     /// @notice Emitted when contract is paused
     event Paused(address account);
     /// @notice Emitted when contract is unpaused
@@ -607,26 +655,50 @@ contract NTE is IERC20 {
     event EmergencyTokenWithdraw(address indexed token, address indexed to, uint256 amount);
     /// @notice Emitted when emergency BNB withdrawal occurs
     event EmergencyBNBWithdraw(address indexed to, uint256 amount);
-    /// @notice Emitted when the staking contract address is updated
-    event StakingContractUpdated(address indexed newStakingContract);
     /// @notice Emitted when helper whitelist enforcement is toggled
     event HelperWhitelistEnforcementUpdated(bool enabled);
     /// @notice Emitted when the PancakeSwap router is updated
     event PancakeRouterUpdated(address indexed newRouter);
     /// @notice Emitted when the primary PancakeSwap pair is updated
     event PancakePairUpdated(address indexed newPair);
-    /// @notice Emitted when tokens are locked for staking
-    event TokensLockedForStaking(address indexed user, uint256 amount);
-    /// @notice Emitted when tokens are unlocked from staking
-    event TokensUnlockedFromStaking(address indexed user, uint256 amount);
 
     // ===================================================
     // MODIFIERS
-    // ===================================================
-    
+    // ===================================================    /// @notice Asserts that the caller has the specified role
+    /// @param role The role being checked
+    function _checkRole(bytes32 role) internal view {
+        if (!hasRole[role][msg.sender]) revert AUTH_INVALID();
+    }
+
+    /// @notice Asserts that the caller has the specified role or governance permissions
+    /// @param role The role being checked
+    function _checkRoleOrGov(bytes32 role) internal view {
+        if (!hasRole[role][msg.sender] && !hasRole[GOVERNANCE_ROLE][msg.sender]) revert AUTH_INVALID();
+    }
+
+    /// @notice Asserts that the caller has emergency or governance permissions
+    function _checkEmergencyOrGov() internal view {
+        if (!hasRole[EMERGENCY_ROLE][msg.sender] && !hasRole[GOVERNANCE_ROLE][msg.sender]) revert AUTH_INVALID();
+    }
+
+    modifier onlyTimelock() {
+        if (msg.sender != address(this)) revert AUTH_INVALID();
+        _;
+    }
+
     /// @notice Restricts function access to the contract owner
-    modifier onlyOwner() {
-        if (msg.sender != _owner) revert AUTH_OWNER();
+    modifier onlyRole(bytes32 role) {
+        _checkRole(role);
+        _;
+    }
+
+    modifier onlyRoleOrGov(bytes32 role) {
+        _checkRoleOrGov(role);
+        _;
+    }
+
+    modifier onlyEmergencyOrGov() {
+        _checkEmergencyOrGov();
         _;
     }
 
@@ -642,30 +714,29 @@ contract NTE is IERC20 {
         _entered = true;
         _;
         _entered = false;
-    }
-    
-    // ===================================================
+    }    // ===================================================
     // CUSTOM ERRORS - Gas Efficient Error Handling
     // ===================================================
     
     /// @notice Thrown when a reentrancy attack is detected
     error SEC_REENTRY();
-    /// @notice Thrown when caller is not the contract owner
-    error AUTH_OWNER();
+    
+    /// @notice Thrown when action is already queued in timelock
+    error TIMELOCK_ALREADY_QUEUED();
+    /// @notice Thrown when action is not queued in timelock
+    error TIMELOCK_NOT_QUEUED();
+    /// @notice Thrown when action is executed before 48-hour delay has passed
+    error TIMELOCK_NOT_READY();
+    /// @notice Thrown when action has expired in timelock
+    error TIMELOCK_EXPIRED();
+    /// @notice Thrown when timelock target execution call fails or reverts
+    error TIMELOCK_CALL_FAILED();
     /// @notice Thrown when caller is not an approved trusted keeper
     error AUTH_KEEPER();
     /// @notice Thrown when attempting to set owner to zero address
     error AUTH_ZERO_OWNER();
-    /// @notice Thrown when ownership action attempted during 30-day lock period
-    error AUTH_LOCKED();
-    /// @notice Thrown when new owner is same as current owner
-    error AUTH_SAME_OWNER();
     /// @notice Thrown when signature validation fails or signer is unauthorized
     error AUTH_INVALID();
-    /// @notice Thrown when caller is not the pending owner during ownership transfer
-    error AUTH_NOT_PENDING_OWNER();
-    /// @notice Thrown when attempting to cancel a non-existent pending ownership transfer
-    error AUTH_NO_PENDING_TRANSFER();
     
     /// @notice Thrown when contract is paused
     error SYS_DISABLED();
@@ -686,10 +757,6 @@ contract NTE is IERC20 {
     error DEX_PAIR_FAIL();
     /// @notice Thrown when pair validation fails
     error DEX_PAIR_CHECK();
-    /// @notice Thrown when WETH external call fails
-    error DEX_WETH_CALL();
-    /// @notice Thrown when factory external call fails
-    error DEX_FACTORY_CALL();
     /// @notice Thrown when pair address is not a contract
     error DEX_PAIR_NOT_CONTRACT();
     /// @notice Thrown when pair was not created by a trusted factory
@@ -822,8 +889,6 @@ contract NTE is IERC20 {
     
     /// @notice Thrown when token address is invalid for emergency withdrawal
     error EMG_INVALID_TOKEN();
-    /// @notice Thrown when emergency withdrawal recipient is zero address
-    error EMG_ZERO_RECIP();
     /// @notice Thrown when contract has insufficient token balance for withdrawal
     error EMG_INSUF_BAL();
     /// @notice Thrown when emergency token transfer fails
@@ -836,8 +901,6 @@ contract NTE is IERC20 {
     error EMG_INSUF_BAL_BNB();
     /// @notice Thrown when emergency BNB transfer fails
     error EMG_BNB_FAIL();
-    /// @notice Thrown when emergency staking unlock attempted before 1-year period
-    error EMG_WAIT_1Y();
     
     /// @notice Thrown when authorized signer is already set
     error AUTH_ALREADY_SET();
@@ -854,10 +917,7 @@ contract NTE is IERC20 {
     /// @notice Thrown when velocity limit is set too high
     error VEL_LIMIT_HIGH();
     
-    /// @notice Thrown when staking contract address is not a contract
-    error STAKING_NOT_CONTRACT();
-    /// @notice Thrown when attempting to change staking contract with active locks
-    error STAKING_ACTIVE_LOCKS();
+
     
     /// @notice Thrown when trying to switch liquidity collectors without withdrawing pending balance
     error LIQ_COLLECTOR_HAS_BALANCE();
@@ -899,7 +959,8 @@ contract NTE is IERC20 {
         uint256 initialSupply,
         address initialOwner,
         address _treasury,
-        address _pancakeRouter
+        address _pancakeRouter,
+        address _rescueVault
     ) {
         if (initialOwner == address(0)) revert AUTH_ZERO_OWNER();
         if (initialSupply == 0) revert TXN_SUPPLY_ZERO();
@@ -907,6 +968,20 @@ contract NTE is IERC20 {
         _deploymentChainId = block.chainid;
         _owner = initialOwner;
         
+        emergencyRescueVault = _rescueVault != address(0) ? _rescueVault : initialOwner;
+
+        // Grant roles to initialOwner
+        hasRole[GOVERNANCE_ROLE][initialOwner] = true;
+        hasRole[TREASURY_ROLE][initialOwner] = true;
+        hasRole[EMERGENCY_ROLE][initialOwner] = true;
+        hasRole[SECURITY_ROLE][initialOwner] = true;
+
+        circuitBreakerThresholdBps = 500;
+        circuitBreakerExempt[initialOwner] = true;
+        circuitBreakerExempt[address(this)] = true;
+
+
+
         _name = "Node Meta Energy";
         _symbol = "NTE";
         
@@ -1200,7 +1275,7 @@ contract NTE is IERC20 {
      * @custom:access Only callable by contract owner
      * @custom:emit CategoryStatusUpdated event
      */
-    function setCategoryEnabled(uint8 category, bool enabled) external onlyOwner {
+    function setCategoryEnabled(uint8 category, bool enabled) external onlyRoleOrGov(SECURITY_ROLE) {
         if (category >= totalCategories) revert CAT_INVALID();
         categoryEnabled[category] = enabled;
         emit CategoryStatusUpdated(category, enabled);
@@ -1217,7 +1292,7 @@ contract NTE is IERC20 {
      * @custom:validation Name must be non-empty and within length limits
      * @custom:emit CategoryUpdated event
      */
-    function updateCategoryName(uint8 category, string calldata newName) external onlyOwner {
+    function updateCategoryName(uint8 category, string calldata newName) external onlyRoleOrGov(SECURITY_ROLE) {
         if (category >= totalCategories) revert CAT_INVALID();
         if (bytes(newName).length == 0) revert STR_EMPTY();
         if (bytes(newName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
@@ -1238,7 +1313,7 @@ contract NTE is IERC20 {
      * @custom:effects Increments totalCategories counter and enables new category
      * @custom:emit CategoryAdded event with new ID and name
      */
-    function addCategory(string calldata categoryName) external onlyOwner returns (uint8 categoryId) {
+    function addCategory(string calldata categoryName) external onlyRoleOrGov(SECURITY_ROLE) returns (uint8 categoryId) {
         if (bytes(categoryName).length == 0) revert STR_EMPTY();
         if (bytes(categoryName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
         if (totalCategories == 255) revert CAT_INVALID();
@@ -1262,7 +1337,7 @@ contract NTE is IERC20 {
      * @custom:security Store private keys in secure infrastructure (HSM/KMS recommended)
      * @custom:emit AuthSignerAdded event
      */
-    function addAuthSigner(address authAddress) external onlyOwner {
+    function addAuthSigner(address authAddress) external onlyRoleOrGov(SECURITY_ROLE) {
         if (authAddress == address(0)) revert ADDR_ZERO();
         if (isAuthSigner[authAddress]) revert AUTH_ALREADY_SET();
         isAuthSigner[authAddress] = true;
@@ -1279,7 +1354,7 @@ contract NTE is IERC20 {
      * @custom:effect Immediately blocks all new signatures from this address
      * @custom:emit AuthSignerRemoved event
      */
-    function removeAuthSigner(address authAddress) external onlyOwner {
+    function removeAuthSigner(address authAddress) external onlyRoleOrGov(SECURITY_ROLE) {
         if (!isAuthSigner[authAddress]) revert AUTH_NOT_SET();
         isAuthSigner[authAddress] = false;
         emit AuthSignerRemoved(authAddress);
@@ -1385,111 +1460,188 @@ contract NTE is IERC20 {
      * @custom:effect Blocks all transfers except potentially owner (based on flag)
      * @custom:emit Paused event with msg.sender
      */
-    function pause(bool includeOwner) external onlyOwner {
+    function pause(bool includeOwner) external onlyEmergencyOrGov {
         _paused = true;
         pauseIncludesOwner = includeOwner;
         emit Paused(msg.sender);
-    }
-    
-    /**
-     * @notice Resumes all token transfers and trading operations after pause.
-     * @dev Sets paused state and pauseIncludesOwner to false, fully restoring operations.
-     *      Used to resume normal trading after emergency or maintenance is resolved.
-     * @custom:security Restores normal operations after emergency pause
-     * @custom:access Only callable by contract owner via onlyOwner modifier
-     * @custom:effect Allows all transfers to proceed normally
-     * @custom:emit Unpaused event with msg.sender
-     */
-    function unpause() external onlyOwner {
+    }    /// @notice Internal helper to unpause the contract and resume trading
+    function _unpause() internal {
         _paused = false;
         pauseIncludesOwner = false;
         emit Unpaused(msg.sender);
     }
+
+    // Role Management Internal Helpers
+    /// @notice Internal helper to grant a role to an address
+    /// @param role The role hash to grant
+    /// @param account The address receiving the role
+    function _grantRole(bytes32 role, address account) internal {
+        if (account == address(0)) revert ADDR_INVALID();
+        if (hasRole[role][account]) revert AUTH_ALREADY_SET();
+        hasRole[role][account] = true;
+        emit RoleGranted(role, account, msg.sender);
+    }
+
+    /// @notice Internal helper to revoke a role from an address
+    /// @param role The role hash to revoke
+    /// @param account The address losing the role
+    function _revokeRole(bytes32 role, address account) internal {
+        if (!hasRole[role][account]) revert AUTH_NOT_SET();
+        hasRole[role][account] = false;
+        emit RoleRevoked(role, account, msg.sender);
+    }    // ============================================
+    // TIMELOCK FUNCTIONS - Native Timelock Engine
+    // ============================================
     
-    /**
-     * @notice Renounces contract ownership permanently, making the contract ownerless.
-     * @dev This is an irreversible operation that removes all owner privileges.
-     *      Safety restrictions:
-     *      - Cannot renounce while paused (prevents permanent lock)
-     *      - Must wait 30 days after launch (OWNERSHIP_LOCK_PERIOD)
-     *      After renouncement, no admin functions can ever be called again.
-     * @custom:access Only callable by current owner
-     * @custom:security 30-day timelock prevents accidental early renouncement
-     * @custom:irreversible Cannot be undone - contract becomes fully decentralized
-     * @custom:emit OwnershipTransferred event with zero address as new owner
-     */
-    function renounceOwnership() external onlyOwner {
-        if (_paused) revert SYS_DISABLED();
-        if (block.timestamp <= launchTime + OWNERSHIP_LOCK_PERIOD) revert AUTH_LOCKED();
-        address previousOwner = _owner;
+    /// @notice Queues an action for execution in the timelock after 48 hours
+    /// @param target The target contract address to invoke
+    /// @param data The payload/calldata to send to the target address
+    function queueAction(address target, bytes calldata data) external onlyRole(GOVERNANCE_ROLE) {
+        bytes32 actionHash = keccak256(abi.encode(target, data));
+        if (timelockQueue[actionHash] != 0) revert TIMELOCK_ALREADY_QUEUED();
+        
+        uint256 eta = block.timestamp + TIMELOCK_DELAY;
+        timelockQueue[actionHash] = eta;
+        emit ActionQueued(actionHash, eta);
+    }
+
+    /// @notice Executes a queued action after the 48-hour timelock delay has elapsed
+    /// @param target The target contract address to invoke
+    /// @param data The payload/calldata to send to the target address
+    /// @return returnData The return data payload from the low-level call execution
+    function executeAction(address target, bytes calldata data) external onlyRole(GOVERNANCE_ROLE) returns (bytes memory) {
+        bytes32 actionHash = keccak256(abi.encode(target, data));
+        uint256 eta = timelockQueue[actionHash];
+        if (eta == 0) revert TIMELOCK_NOT_QUEUED();
+        if (block.timestamp < eta) revert TIMELOCK_NOT_READY();
+        if (block.timestamp > eta + TIMELOCK_GRACE_PERIOD) revert TIMELOCK_EXPIRED();
+        
+        delete timelockQueue[actionHash];
+        
+        (bool success, bytes memory returnData) = target.call(data);
+        if (!success) {
+            if (returnData.length > 0) {
+                assembly {
+                    let returndata_size := mload(returnData)
+                    revert(add(32, returnData), returndata_size)
+                }
+            } else {
+                revert TIMELOCK_CALL_FAILED();
+            }
+        }
+        
+        emit ActionExecuted(actionHash);
+        return returnData;
+    }
+
+    /// @notice Cancels a previously queued action in the timelock
+    /// @param target The target contract address to cancel
+    /// @param data The payload/calldata to cancel
+    function cancelAction(address target, bytes calldata data) external onlyRole(GOVERNANCE_ROLE) {
+        bytes32 actionHash = keccak256(abi.encode(target, data));
+        if (timelockQueue[actionHash] == 0) revert TIMELOCK_NOT_QUEUED();
+        
+        delete timelockQueue[actionHash];
+        emit ActionCanceled(actionHash);
+    }    // ============================================
+    // TIMELOCKED OPERATIONAL INTERFACES
+    // ============================================
+
+    /// @notice Timelocked interface to update buy, sell, and transfer taxes
+    /// @param newBuy The new buy tax in basis points
+    /// @param newSell The new sell tax in basis points
+    /// @param newXfer The new transfer tax in basis points
+    function setAllTaxBasisPoints(uint256 newBuy, uint256 newSell, uint256 newXfer) external onlyTimelock {
+        _setAllTaxBasisPoints(newBuy, newSell, newXfer);
+    }
+
+    /// @notice Timelocked interface to configure automated liquidity collection parameters
+    /// @param enabled True to enable automated liquidity conversion, false to disable
+    /// @param percentageBps The portion of collected tax sent to the liquidity pool (in basis points)
+    /// @param collector The address designated to collect liquidity tokens
+    function configureAutoLiquidity(bool enabled, uint256 percentageBps, address collector) external onlyTimelock {
+        _configureAutoLiquidity(enabled, percentageBps, collector);
+    }
+
+    /// @notice Timelocked interface to update the protocol treasury wallet
+    /// @param newTreasury The address of the new treasury wallet
+    function setTreasury(address newTreasury) external onlyTimelock {
+        _setTreasury(newTreasury);
+    }
+
+    /// @notice Timelocked interface to rescue accidentally sent ERC20 tokens
+    /// @param token The address of the ERC20 token to recover
+    /// @param to The recipient address (must match emergencyRescueVault)
+    /// @param amount The token amount to recover
+    function emergencyWithdrawToken(address token, address to, uint256 amount) external onlyTimelock {
+        _emergencyWithdrawToken(token, to, amount);
+    }
+
+    /// @notice Timelocked interface to rescue native BNB/Ether
+    /// @param to The recipient address (must match emergencyRescueVault)
+    /// @param amount The BNB amount in wei to recover
+    function emergencyWithdrawBNB(address payable to, uint256 amount) external onlyTimelock {
+        _emergencyWithdrawBNB(to, amount);
+    }
+
+    /// @notice Timelocked interface to unpause/resume trading operations
+    function unpause() external onlyTimelock {
+        _unpause();
+    }
+
+    /// @notice Timelocked interface to manage recognized PancakeSwap pair addresses
+    /// @param pair The target liquidity pair address
+    /// @param status True to register the address as a trading pair, false to deregister
+    function setDexPairStatus(address pair, bool status) external onlyTimelock {
+        _setDexPairStatus(pair, status);
+    }
+
+    /// @notice Timelocked interface to update the active PancakeSwap router
+    /// @param _router The address of the new PancakeSwap router contract
+    function setPancakeRouter(address _router) external onlyTimelock {
+        _setPancakeRouter(_router);
+    }
+
+    /// @notice Timelocked interface to update the active primary PancakeSwap pair
+    /// @param _pair The address of the new PancakeSwap pair contract
+    function setPancakePair(address _pair) external onlyTimelock {
+        _setPancakePair(_pair);
+    }
+
+    /// @notice Timelocked interface to configure the circuit breaker threshold and exemptions
+    /// @param newThresholdBps The new circuit breaker threshold in basis points (100 = 1%)
+    /// @param exemptAddress The address receiving/losing exemption status
+    /// @param exemptStatus True to exempt the address, false otherwise
+    function setCircuitBreaker(uint256 newThresholdBps, address exemptAddress, bool exemptStatus) external onlyTimelock {
+        _setCircuitBreaker(newThresholdBps, exemptAddress, exemptStatus);
+    }
+
+    /// @notice Timelocked interface to grant role privileges to an account
+    /// @param role The role hash being granted
+    /// @param account The recipient address
+    function grantRole(bytes32 role, address account) external onlyTimelock {
+        _grantRole(role, account);
+    }
+
+    /// @notice Timelocked interface to revoke role privileges from an account
+    /// @param role The role hash being revoked
+    /// @param account The address losing privileges
+    function revokeRole(bytes32 role, address account) external onlyTimelock {
+        _revokeRole(role, account);
+    }
+
+    /// @notice Timelocked interface for compliance to renounce ownership of the contract
+    function renounceOwnership() external onlyTimelock {
+        emit OwnershipTransferred(_owner, address(0));
         _owner = address(0);
-        emit OwnershipTransferred(previousOwner, address(0));
     }
-    
-    /**
-     * @notice Initiates a two-step ownership transfer to a new address.
-     * @dev Step 1 of 2-step ownership transfer process. The new owner must call
-     *      acceptOwnership() to complete the transfer. This prevents accidental
-     *      transfers to wrong addresses or addresses that can't accept ownership.
-     *      Reverts with AUTH_ZERO_OWNER if newOwner is zero address,
-     *      or AUTH_SAME_OWNER if newOwner is already the current owner.
-     * @param newOwner The address that will become the new owner (cannot be zero or current owner)
-     * @custom:access Only callable by current owner
-     * @custom:security Two-step process prevents accidental ownership loss
-     * @custom:emit OwnershipTransferStarted event to signal pending transfer
-     */
-    function transferOwnership(address newOwner) external onlyOwner {
+
+    /// @notice Timelocked interface for compliance to transfer ownership to a new address
+    /// @param newOwner The new owner address
+    function transferOwnership(address newOwner) external onlyTimelock {
         if (newOwner == address(0)) revert AUTH_ZERO_OWNER();
-        if (newOwner == _owner) revert AUTH_SAME_OWNER();
-        _pendingOwner = newOwner;
-        emit OwnershipTransferStarted(_owner, newOwner);
-    }
-    
-    /**
-     * @notice Accepts a pending ownership transfer to complete the two-step process.
-     * @dev Step 2 of 2-step ownership transfer. Can only be called by the pending owner
-     *      set in transferOwnership(). Completes the ownership transfer and grants
-     *      full admin privileges to caller.
-     *      Reverts with AUTH_NOT_PENDING_OWNER if caller is not the pending owner.
-     * @custom:access Only callable by pending owner address
-     * @custom:security Prevents unauthorized ownership takeover
-     * @custom:emit OwnershipTransferred event with old and new owner addresses
-     */
-    function acceptOwnership() external {
-        if (msg.sender != _pendingOwner) revert AUTH_NOT_PENDING_OWNER();
-        address previousOwner = _owner;
-        _owner = _pendingOwner;
-        _pendingOwner = address(0);
-        emit OwnershipTransferred(previousOwner, _owner);
-    }
-    
-    /**
-     * @notice Cancels a pending ownership transfer before it's accepted.
-     * @dev Allows current owner to revoke an ownership transfer that was initiated
-     *      but not yet accepted. Clears the pending owner address.
-     * @custom:access Only callable by current owner
-     * @custom:effect Resets pending owner to zero address
-     * @custom:emit OwnershipTransferCanceled event
-     */
-    function cancelOwnershipTransfer() external onlyOwner {
-        if (_pendingOwner == address(0)) revert AUTH_NO_PENDING_TRANSFER();
-        _pendingOwner = address(0);
-        emit OwnershipTransferStarted(_owner, address(0));
-    }
-    
-    /**
-     * @notice Returns the address of the pending owner in a two-step ownership transfer.
-     * @dev Queries the _pendingOwner state variable set during transferOwnership().
-     *      A non-zero return value indicates an ownership transfer is in progress.
-     *      The pending owner must call acceptOwnership() to complete the transfer.
-     *      Returns zero address when no transfer is pending or after completion/cancellation.
-     * @return pendingOwnerAddress The address authorized to accept ownership, or zero if no transfer pending
-     * @custom:view Read-only function with no state modifications or gas cost
-     * @custom:usage Check transfer status before accepting or monitor pending transfers
-     * @custom:security Part of two-step ownership transfer security mechanism
-     */
-    function pendingOwner() external view returns (address) {
-        return _pendingOwner;
+        emit OwnershipTransferred(_owner, newOwner);
+        _owner = newOwner;
     }
     
     /**
@@ -1550,11 +1702,11 @@ contract NTE is IERC20 {
      * @custom:cooldown 24-hour cooldown between tax adjustments
      * @custom:emit TaxRatesUpdated event with all three new rates
      */
-    function setAllTaxBasisPoints(
+    function _setAllTaxBasisPoints(
         uint256 newBuyTaxBps,
         uint256 newSellTaxBps,
         uint256 newTransferTaxBps
-    ) external onlyOwner {
+    ) internal {
         if (newBuyTaxBps > MAX_TAX_LIMIT) revert TAX_BUY_HIGH();
         if (newSellTaxBps > MAX_TAX_LIMIT) revert TAX_SELL_HIGH();
         if (newTransferTaxBps > MAX_TAX_LIMIT) revert TAX_XFER_HIGH();
@@ -1609,11 +1761,11 @@ contract NTE is IERC20 {
      * @custom:usage Ideal for: auto-liquidity, buyback-and-LP, protocol-owned liquidity (POL)
      * @custom:emit AutoLiquidityConfigUpdated event
      */
-    function configureAutoLiquidity(
+    function _configureAutoLiquidity(
         bool enabled,
         uint256 percentageBps,
         address collector
-    ) external onlyOwner {
+    ) internal {
         if (!enabled) {
             autoLiquidityEnabled = false;
             emit AutoLiquidityConfigUpdated(false, autoLiquidityBps, liquidityCollector);
@@ -1647,7 +1799,7 @@ contract NTE is IERC20 {
      * @custom:usage Grant to: routers, pairs, liquidity managers, authorized contracts
      * @custom:emit TaxExemptUpdated event
      */
-    function setTaxExempt(address user, bool exempt) external onlyOwner {
+    function setTaxExempt(address user, bool exempt) external onlyRoleOrGov(SECURITY_ROLE) {
         if (user == address(0)) revert ADDR_INVALID();
         taxExempt[user] = exempt;
         emit TaxExemptUpdated(user, exempt);
@@ -1671,9 +1823,9 @@ contract NTE is IERC20 {
      * @custom:temporary Set expiryTime > 0 for temporary bans that auto-expire
      * @custom:emit BlacklistUpdated and optionally BlacklistExpirySet events
      */
-    function setBlacklist(address account, bool blacklisted, uint256 expiryTime) external onlyOwner {
+    function setBlacklist(address account, bool blacklisted, uint256 expiryTime) external onlyRoleOrGov(SECURITY_ROLE) {
         if (account == address(0)) revert ADDR_INVALID();
-        if (account == _owner) revert BL_OWNER();
+        if (hasRole[GOVERNANCE_ROLE][account]) revert BL_OWNER(); // Prevent blacklisting governance accounts
         if (account == address(this)) revert BL_CONTRACT();
         isBlacklisted[account] = blacklisted;
         if (blacklisted && expiryTime > 0) {
@@ -1698,7 +1850,7 @@ contract NTE is IERC20 {
      * @custom:effect When enabled, non-whitelisted addresses cannot trade
      * @custom:emit WhitelistModeUpdated event
      */
-    function setWhitelistMode(bool enabled) external onlyOwner {
+    function setWhitelistMode(bool enabled) external onlyRoleOrGov(SECURITY_ROLE) {
         whitelistEnabled = enabled;
         emit WhitelistModeUpdated(enabled);
     }
@@ -1718,7 +1870,7 @@ contract NTE is IERC20 {
      * @custom:temporary Set expiryTime > 0 for time-limited trading permissions
      * @custom:emit WhitelistUpdated and optionally WhitelistExpirySet events
      */
-    function setWhitelist(address account, bool whitelisted, uint256 expiryTime) external onlyOwner {
+    function setWhitelist(address account, bool whitelisted, uint256 expiryTime) external onlyRoleOrGov(SECURITY_ROLE) {
         if (account == address(0)) revert ADDR_INVALID();
         isWhitelisted[account] = whitelisted;
         if (whitelisted && expiryTime > 0) {
@@ -1741,7 +1893,7 @@ contract NTE is IERC20 {
      * @custom:effect All future tax proceeds will be sent to new treasury address
      * @custom:emit TreasuryUpdated event with new address
      */
-    function setTreasury(address newTreasury) external onlyOwner {
+    function _setTreasury(address newTreasury) internal {
         if (newTreasury == address(0)) revert TAX_TREASURY_ZERO();
         if (newTreasury == treasury) revert TAX_TREASURY_SAME();
         
@@ -1763,7 +1915,7 @@ contract NTE is IERC20 {
      * @custom:visibility Updates name() and symbol() view functions immediately
      * @custom:emit NameSymbolUpdated event with both new values
      */
-    function setNameAndSymbol(string calldata newName, string calldata newSymbol) external onlyOwner {
+    function setNameAndSymbol(string calldata newName, string calldata newSymbol) external onlyRole(GOVERNANCE_ROLE) {
         if (bytes(newName).length == 0) revert STR_EMPTY();
         if (bytes(newSymbol).length == 0) revert STR_EMPTY();
         if (bytes(newName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
@@ -1790,7 +1942,7 @@ contract NTE is IERC20 {
      * @custom:protection Prevents whale dumps that could crash token price
      * @custom:emit AntiDumpConfigUpdated event with all three parameters
      */
-    function setAntiDumpConfig(bool enabled, uint256 maxPercentage, uint256 cooldownTime) external onlyOwner {
+    function setAntiDumpConfig(bool enabled, uint256 maxPercentage, uint256 cooldownTime) external onlyRoleOrGov(SECURITY_ROLE) {
         if (maxPercentage == 0 || maxPercentage > MAX_ANTI_DUMP_PERCENT) revert DUMP_PERCENT();
         if (cooldownTime > MAX_ANTI_DUMP_COOLDOWN) revert CD_TOO_HIGH();
         antiDumpEnabled = enabled;
@@ -1813,7 +1965,7 @@ contract NTE is IERC20 {
      * @custom:protection Prevents trades that cause excessive price slippage
      * @custom:emit PriceImpactLimitConfigUpdated event
      */
-    function setPriceImpactLimitConfig(bool enabled, uint256 maxImpactBasisPoints) external onlyOwner {
+    function setPriceImpactLimitConfig(bool enabled, uint256 maxImpactBasisPoints) external onlyRoleOrGov(SECURITY_ROLE) {
         if (enabled && maxImpactBasisPoints < MIN_PRICE_IMPACT_BPS) revert PRICE_MIN_IMPACT();
         if (maxImpactBasisPoints > BASIS_POINTS) revert PRICE_INVALID();
         priceImpactLimitEnabled = enabled;
@@ -1832,7 +1984,7 @@ contract NTE is IERC20 {
      * @custom:usage Typically granted to liquidity managers or trusted contracts
      * @custom:emit PriceImpactExemptUpdated event
      */
-    function setPriceImpactExempt(address account, bool exempt) external onlyOwner {
+    function setPriceImpactExempt(address account, bool exempt) external onlyRoleOrGov(SECURITY_ROLE) {
         if (account == address(0)) revert ADDR_INVALID();
         priceImpactExempt[account] = exempt;
         emit PriceImpactExemptUpdated(account, exempt);
@@ -1849,7 +2001,7 @@ contract NTE is IERC20 {
      * @custom:protection Prevents rapid bot trading and front-running attacks
      * @custom:emit WalletCooldownConfigUpdated event
      */
-    function setWalletCooldownConfig(bool enabled, uint256 cooldownSeconds) external onlyOwner {
+    function setWalletCooldownConfig(bool enabled, uint256 cooldownSeconds) external onlyRoleOrGov(SECURITY_ROLE) {
         if (cooldownSeconds > MAX_COOLDOWN) revert CD_TOO_HIGH();
         walletCooldownEnabled = enabled;
         globalCooldownSeconds = cooldownSeconds;
@@ -1867,7 +2019,7 @@ contract NTE is IERC20 {
      * @custom:usage Grant to: exchange hot wallets, trusted high-frequency infrastructure
      * @custom:emit WalletCooldownExemptUpdated event
      */
-    function setWalletCooldownExempt(address account, bool exempt) external onlyOwner {
+    function setWalletCooldownExempt(address account, bool exempt) external onlyRoleOrGov(SECURITY_ROLE) {
         if (account == address(0)) revert ADDR_INVALID();
         walletCooldownExempt[account] = exempt;
         emit WalletCooldownExemptUpdated(account, exempt);
@@ -1889,9 +2041,9 @@ contract NTE is IERC20 {
      * @custom:safety Low-level call handles both standard and non-standard ERC20s
      * @custom:emit EmergencyTokenWithdraw event
      */
-    function emergencyWithdrawToken(address token, address to, uint256 amount) external onlyOwner nonReentrant {
+    function _emergencyWithdrawToken(address token, address to, uint256 amount) internal nonReentrant {
         if (token == address(0)) revert EMG_INVALID_TOKEN();
-        if (to == address(0)) revert EMG_ZERO_RECIP();
+        if (to != emergencyRescueVault) revert EMG_INVALID_RECIP();
         
         // Check contract has sufficient balance
         uint256 contractBalance = IERC20(token).balanceOf(address(this));
@@ -1924,9 +2076,9 @@ contract NTE is IERC20 {
      * @custom:security 30-day timelock prevents immediate withdrawal after launch
      * @custom:emit EmergencyBNBWithdraw event
      */
-    function emergencyWithdrawBNB(address payable to, uint256 amount) external onlyOwner nonReentrant {
+    function _emergencyWithdrawBNB(address payable to, uint256 amount) internal nonReentrant {
         if (block.timestamp <= launchTime + OWNERSHIP_LOCK_PERIOD) revert EMG_WAIT_30D();
-        if (to == address(0)) revert EMG_INVALID_RECIP();
+        if (to != emergencyRescueVault) revert EMG_INVALID_RECIP();
         if (amount > address(this).balance) revert EMG_INSUF_BAL_BNB();
         (bool success, ) = to.call{value: amount}("");
         if (!success) revert EMG_BNB_FAIL();
@@ -1951,7 +2103,7 @@ contract NTE is IERC20 {
      * @custom:protection Prevents sandwich attacks, front-running, and block manipulation
      * @custom:emit MevProtectionConfigured and optionally MevProtectionToggled events
      */
-    function setMevProtectionConfig(bool enabled, uint256 maxBlocks, uint256 minTime) external onlyOwner {
+    function setMevProtectionConfig(bool enabled, uint256 maxBlocks, uint256 minTime) external onlyRoleOrGov(SECURITY_ROLE) {
         // When enabling protection, at least one of the parameters must be non-zero
         if (enabled && maxBlocks == 0 && minTime == 0) revert MEV_CONFIG_INVALID();
         if (maxBlocks > MAX_MEV_BLOCKS) revert MEV_BLOCKS_HIGH();
@@ -1980,7 +2132,7 @@ contract NTE is IERC20 {
      * @custom:usage Grant to: routers, aggregators, trusted DeFi protocols
      * @custom:emit MevProtectionExemptUpdated event
      */
-    function setMevProtectionExempt(address account, bool exempt) external onlyOwner {
+    function setMevProtectionExempt(address account, bool exempt) external onlyRoleOrGov(SECURITY_ROLE) {
         if (account == address(0)) revert ADDR_INVALID();
         mevProtectionExempt[account] = exempt;
         emit MevProtectionExemptUpdated(account, exempt);
@@ -2001,7 +2153,7 @@ contract NTE is IERC20 {
      * @custom:protection Prevents bot spam, rapid dumps, and automated manipulation
      * @custom:emit VelocityLimitConfigured event
      */
-    function setVelocityLimitConfig(bool enabled, uint256 maxTx, uint256 timeWindow) external onlyOwner {
+    function setVelocityLimitConfig(bool enabled, uint256 maxTx, uint256 timeWindow) external onlyRoleOrGov(SECURITY_ROLE) {
         if (enabled) {
             if (maxTx == 0 || timeWindow == 0) revert VEL_CONFIG_INVALID();
             if (maxTx > MAX_VELOCITY_BUFFER) revert VEL_LIMIT_HIGH();
@@ -2026,7 +2178,7 @@ contract NTE is IERC20 {
      * @custom:usage Grant to: routers, aggregators, liquidity managers
      * @custom:emit VelocityLimitExemptUpdated event
      */
-    function setVelocityLimitExempt(address account, bool exempt) external onlyOwner {
+    function setVelocityLimitExempt(address account, bool exempt) external onlyRoleOrGov(SECURITY_ROLE) {
         if (account == address(0)) revert ADDR_INVALID();
         velocityLimitExempt[account] = exempt;
         emit VelocityLimitExemptUpdated(account, exempt);
@@ -2047,7 +2199,7 @@ contract NTE is IERC20 {
      * @custom:usage Typically used for category helper and liquidity manager contracts
      * @custom:emit HelperBypassUpdated event
      */
-    function setHelperBypass(address helper, bool enabled) external onlyOwner {
+    function setHelperBypass(address helper, bool enabled) external onlyRoleOrGov(SECURITY_ROLE) {
         if (helper == address(0)) revert ADDR_INVALID();
         if (enabled && !_isContract(helper)) revert ADDR_NOT_CONTRACT();
         helperBypass[helper] = enabled;
@@ -2062,42 +2214,26 @@ contract NTE is IERC20 {
      * @return exempt True if address is exempt from all taxes, false otherwise
      * @custom:view Read-only function with no state changes
      */
-    function isTaxExempt(address account) external view returns (bool) {
-        return taxExempt[account];
-    }
-
     /**
-     * @notice Returns whether an address is exempt from MEV protection checks.
-     * @dev MEV-exempt addresses can trade in consecutive blocks without restrictions.
-     *      Typically granted to trusted contracts and liquidity management systems.
-     * @param account The address to query MEV exemption status
-     * @return exempt True if address bypasses MEV protection, false otherwise
-     * @custom:view Read-only function with no state changes
-     */
-    function isMevProtectionExempt(address account) external view returns (bool) {
-        return mevProtectionExempt[account];
-    }
-
-    /**
-     * @notice Returns whether an address is exempt from velocity limit checks.
-     * @dev Velocity-exempt addresses can execute unlimited transactions within time window.
-     *      Typically granted to DEX routers, aggregators, and trusted protocol contracts.
-     * @param account The address to query velocity exemption status
-     * @return exempt True if address bypasses velocity limits, false otherwise
-     * @custom:view Read-only function with no state changes
-     */
-    function isVelocityLimitExempt(address account) external view returns (bool) {
-        return velocityLimitExempt[account];
-    }
-
-    /**
-     * @notice Returns whether an address is exempt from wallet cooldown checks.
+     * @notice Returns a snapshot of all exemptions for a specific address.
      * @param account The address to query
-     * @return exempt True if address bypasses wallet cooldown, false otherwise
-     * @custom:view Read-only function with no state changes
+     * @return tax True if address is exempt from transfer taxes
+     * @return mev True if address is exempt from MEV protection
+     * @return velocity True if address is exempt from velocity limits
+     * @return cooldown True if address is exempt from wallet cooldown
      */
-    function isWalletCooldownExempt(address account) external view returns (bool) {
-        return walletCooldownExempt[account];
+    function getExemptionStatus(address account) external view returns (
+        bool tax,
+        bool mev,
+        bool velocity,
+        bool cooldown
+    ) {
+        return (
+            taxExempt[account],
+            mevProtectionExempt[account],
+            velocityLimitExempt[account],
+            walletCooldownExempt[account]
+        );
     }
 
     /**
@@ -2165,31 +2301,6 @@ contract NTE is IERC20 {
     }
     
     /**
-     * @notice Public utility to remove expired blacklist entries and free storage.
-     * @dev Anyone can call this function to clean up expired blacklist data.
-     *      Performs gas-efficient cleanup by resetting both isBlacklisted flag
-     *      and blacklistExpiry timestamp when an entry has expired.
-     *      
-     *      **Cleanup conditions (all must be true):**
-     *      1. Address is marked as blacklisted
-     *      2. Expiry timestamp is non-zero (not permanent)
-     *      3. Current time >= expiry timestamp (has expired)
-     *      
-     *      Gas refund: Resetting storage to zero returns gas (SSTORE refund).
-     *      Emits BlacklistUpdated event to notify off-chain systems.
-     * @param account The address to clean up expired blacklist data for
-     * @custom:public Anyone can call to trigger cleanup (permissionless)
-     * @custom:gas Storage reset provides gas refund to caller
-     * @custom:emit BlacklistUpdated event when cleanup occurs
-     * @custom:usage Useful for keeping contract state clean and claiming gas refunds
-     */
-    function cleanExpiredBlacklist(address account) external {
-        if (isBlacklisted[account] && blacklistExpiry[account] != 0 && block.timestamp >= blacklistExpiry[account]) {
-            isBlacklisted[account] = false;
-            blacklistExpiry[account] = 0;
-            emit BlacklistUpdated(account, false);
-        }
-    }
     
     /**
      * @notice Checks if an address is currently whitelisted with an active (non-expired) permission.
@@ -2216,33 +2327,7 @@ contract NTE is IERC20 {
         return block.timestamp < whitelistExpiry[account];
     }
     
-    /**
-     * @notice Public utility to remove expired whitelist entries and free storage.
-     * @dev Anyone can call this function to clean up expired whitelist data.
-     *      Performs gas-efficient cleanup by resetting both isWhitelisted flag
-     *      and whitelistExpiry timestamp when an entry has expired.
-     *      
-     *      **Cleanup conditions (all must be true):**
-     *      1. Address is marked as whitelisted
-     *      2. Expiry timestamp is non-zero (not permanent)
-     *      3. Current time >= expiry timestamp (has expired)
-     *      
-     *      Gas refund: Resetting storage to zero returns gas (SSTORE refund).
-     *      Emits WhitelistUpdated event to notify off-chain systems.
-     * @param account The address to clean up expired whitelist data for
-     * @custom:public Anyone can call to trigger cleanup (permissionless)
-     * @custom:gas Storage reset provides gas refund to caller
-     * @custom:emit WhitelistUpdated event when cleanup occurs
-     * @custom:usage Useful for keeping contract state clean and claiming gas refunds
-     */
-    function cleanExpiredWhitelist(address account) external {
-        if (isWhitelisted[account] && whitelistExpiry[account] != 0 && block.timestamp >= whitelistExpiry[account]) {
-            isWhitelisted[account] = false;
-            whitelistExpiry[account] = 0;
-            emit WhitelistUpdated(account, false);
-        }
-    }
-
+    
     /**
      * @notice Registers or unregisters a DEX pair address for proper tax application.
      * @dev DEX pairs are used to determine if a transfer is a buy/sell (taxed) or
@@ -2259,7 +2344,7 @@ contract NTE is IERC20 {
      * @custom:safety Cannot disable main pancakePair to prevent tax evasion
      * @custom:emit DexPairUpdated event
      */
-    function setDexPairStatus(address pair, bool status) external onlyOwner {
+    function _setDexPairStatus(address pair, bool status) internal {
         if (pair == address(0)) revert ADDR_INVALID();
         if (!_isContract(pair)) revert DEX_PAIR_NOT_CONTRACT();
         // Prevent accidentally disabling the main pancakePair
@@ -2279,7 +2364,7 @@ contract NTE is IERC20 {
      * @custom:access Only callable by contract owner
      * @custom:emit TrustedFactoryUpdated event
      */
-    function setTrustedFactory(address factory, bool trusted) external onlyOwner {
+    function setTrustedFactory(address factory, bool trusted) external onlyRoleOrGov(SECURITY_ROLE) {
         if (factory == address(0)) revert ADDR_INVALID();
         if (trusted && !_isContract(factory)) revert DEX_FACTORY();
         trustedFactory[factory] = trusted;
@@ -2298,7 +2383,7 @@ contract NTE is IERC20 {
      * @custom:access Only callable by contract owner
      * @custom:emit TrustedRouterUpdated event
      */
-    function setTrustedRouter(address router, bool trusted) external onlyOwner {
+    function setTrustedRouter(address router, bool trusted) external onlyRoleOrGov(SECURITY_ROLE) {
         if (router == address(0)) revert ADDR_INVALID();
         if (trusted && !_isContract(router)) revert DEX_ROUTER();
         trustedRouters[router] = trusted;
@@ -2314,7 +2399,7 @@ contract NTE is IERC20 {
      * @custom:access Only callable by contract owner
      * @custom:emit TrustedKeeperUpdated event
      */
-    function setTrustedKeeper(address keeper, bool trusted) external onlyOwner {
+    function setTrustedKeeper(address keeper, bool trusted) external onlyRoleOrGov(SECURITY_ROLE) {
         if (keeper == address(0)) revert ADDR_INVALID();
         trustedKeepers[keeper] = trusted;
         emit TrustedKeeperUpdated(keeper, trusted);
@@ -2366,7 +2451,7 @@ contract NTE is IERC20 {
      * @custom:usage Update when migrating to new DEX version or fixing deployment issues
      * @custom:emit PancakeRouterUpdated and TrustedRouterUpdated events
      */
-    function setPancakeRouter(address _pancakeRouter) external onlyOwner {
+    function _setPancakeRouter(address _pancakeRouter) internal {
         if (_pancakeRouter == address(0)) revert ADDR_ZERO();
         if (!_isContract(_pancakeRouter)) revert DEX_ROUTER();
 
@@ -2399,7 +2484,7 @@ contract NTE is IERC20 {
      * @custom:effect Unregisters old pair and registers new pair automatically
      * @custom:emit PancakePairUpdated event
      */
-    function setPancakePair(address _pancakePair) external onlyOwner {
+    function _setPancakePair(address _pancakePair) internal {
         if (_pancakePair == address(0)) revert ADDR_ZERO();
         if (!_isContract(_pancakePair)) revert DEX_PAIR_NOT_CONTRACT();
         
@@ -2414,29 +2499,6 @@ contract NTE is IERC20 {
     }
 
     /**
-     * @notice Sets the authorized staking contract that can lock/unlock user balances.
-     * @dev The staking contract is granted special privileges to lock tokens without
-     *      transferring them, enabling users to stake while keeping tokens in their wallet.
-     *      Safety check prevents changing staking contract if users have active locks.
-     *      Reverts with ADDR_ZERO if contract is zero address,
-     *      STAKING_NOT_CONTRACT if not a valid contract,
-     *      or STAKING_ACTIVE_LOCKS if trying to change with existing locks.
-     * @param _stakingContract The staking contract address (must be valid contract)
-     * @custom:access Only callable by contract owner
-     * @custom:security Cannot change if totalLockedForStaking > 0 (protects user funds)
-     * @custom:integration Staking contract calls lockFromStaking/unlockFromStaking
-     * @custom:emit StakingContractUpdated event
-     */
-    function setStakingContract(address _stakingContract) external onlyOwner {
-        if (_stakingContract == address(0)) revert ADDR_ZERO();
-        if (!_isContract(_stakingContract)) revert STAKING_NOT_CONTRACT();
-        if (_stakingContract != stakingContract && totalLockedForStaking > 0) revert STAKING_ACTIVE_LOCKS();
-        stakingContract = _stakingContract;
-        
-        emit StakingContractUpdated(_stakingContract);
-    }
-
-    /**
      * @notice Toggles whitelist enforcement for helper-bypass transfers.
      * @dev Controls whether helper contracts using bypass mode must still pass
      *      whitelist checks when whitelistEnabled is true. When enforcement is
@@ -2447,96 +2509,26 @@ contract NTE is IERC20 {
      * @custom:conditional Only relevant when whitelistEnabled is true
      * @custom:emit HelperWhitelistEnforcementUpdated event
      */
-    function setHelperWhitelistEnforcement(bool enabled) external onlyOwner {
+    function setHelperWhitelistEnforcement(bool enabled) external onlyRoleOrGov(SECURITY_ROLE) {
         enforceWhitelistOnHelper = enabled;
         emit HelperWhitelistEnforcementUpdated(enabled);
-    }
-
-    /**
-     * @notice Called exclusively by staking contract to lock tokens for a user.
-     * @dev Locks tokens in-place without transferring them, preventing user from
-     *      transferring locked amount while maintaining wallet balance visibility.
-     *      Locked tokens still appear in balanceOf() but cannot be transferred.
-     *      Reverts with AUTH_INVALID if caller is not the staking contract,
-     *      ADDR_INVALID if user is zero address, TXN_AMOUNT_ZERO if amount is zero,
-     *      or TXN_EXCEEDS_BAL if user doesn't have sufficient unlocked balance.
-     * @param user The address whose tokens will be locked (cannot be zero)
-     * @param amount The amount of tokens to lock (in base units with 18 decimals)
-     * @custom:access ONLY callable by authorized stakingContract address
-     * @custom:effects Increases lockedForStaking[user] and totalLockedForStaking
-     * @custom:security User must have sufficient unlocked balance for the lock
-     * @custom:emit TokensLockedForStaking event
-     */
-    function lockFromStaking(address user, uint256 amount) external {
-        if (msg.sender != stakingContract) revert AUTH_INVALID();
-        if (user == address(0)) revert ADDR_INVALID();
-        if (amount == 0) revert TXN_AMOUNT_ZERO();
-        uint256 balance = _balances[user];
-        uint256 locked = lockedForStaking[user];
-        if (balance < locked + amount) revert TXN_EXCEEDS_BAL();
-        unchecked {
-            lockedForStaking[user] = locked + amount;
-        }
-        totalLockedForStaking += amount;
+    }    // Circuit Breaker Internal Helper
+    /// @notice Internal helper to configure circuit breaker settings
+    /// @param newThresholdBps The new threshold in basis points (100 = 1%)
+    /// @param exemptAddress The address to configure exemptions for
+    /// @param exemptStatus The exemption status to apply
+    function _setCircuitBreaker(uint256 newThresholdBps, address exemptAddress, bool exemptStatus) internal {
+        if (newThresholdBps > BASIS_POINTS) revert PRICE_INVALID();
+        circuitBreakerThresholdBps = newThresholdBps;
+        emit CircuitBreakerThresholdUpdated(newThresholdBps);
         
-        emit TokensLockedForStaking(user, amount);
-    }
-
-    /**
-     * @notice Called exclusively by staking contract to unlock tokens for a user.
-     * @dev Unlocks previously locked tokens, making them freely transferable again.
-     *      This is called when user unstakes or claims rewards. Tokens never leave
-     *      the user's wallet during the lock/unlock cycle.
-     *      Reverts with AUTH_INVALID if caller is not the staking contract,
-     *      ADDR_INVALID if user is zero address, TXN_AMOUNT_ZERO if amount is zero,
-     *      or TXN_EXCEEDS_BAL if trying to unlock more than currently locked.
-     * @param user The address whose tokens will be unlocked (cannot be zero)
-     * @param amount The amount of tokens to unlock (in base units with 18 decimals)
-     * @custom:access ONLY callable by authorized stakingContract address
-     * @custom:effects Decreases lockedForStaking[user] and totalLockedForStaking
-     * @custom:security Cannot unlock more than currently locked amount
-     * @custom:emit TokensUnlockedFromStaking event
-     */
-    function unlockFromStaking(address user, uint256 amount) external {
-        if (msg.sender != stakingContract) revert AUTH_INVALID();
-        if (user == address(0)) revert ADDR_INVALID();
-        if (amount == 0) revert TXN_AMOUNT_ZERO();
-        uint256 locked = lockedForStaking[user];
-        if (locked < amount) revert TXN_EXCEEDS_BAL();
-        unchecked {
-            lockedForStaking[user] = locked - amount;
-        }
-        totalLockedForStaking -= amount;
-        
-        emit TokensUnlockedFromStaking(user, amount);
-    }
-
-    /**
-     * @notice Emergency function to unlock staking tokens if staking contract fails.
-     * @dev Safety mechanism to recover locked tokens if staking contract becomes
-     *      non-functional or malicious. Strict safety restrictions:
-     *      - Can only be called 1 year (365 days) after launch
-     *      - Only works if stakingContract is invalid or not a contract anymore
-     *      This prevents abuse while providing ultimate recovery for users.
-     *      Reverts with EMG_WAIT_1Y if called before 1-year period,
-     *      or STAKING_ACTIVE_LOCKS if staking contract is still valid.
-     * @param user The address whose locked tokens should be emergency unlocked
-     * @custom:access Only callable by contract owner
-     * @custom:security 1-year timelock + staking contract must be broken
-     * @custom:emergency Last resort recovery if staking contract becomes unusable
-     * @custom:emit TokensUnlockedFromStaking event
-     */
-    function emergencyUnlockStaking(address user) external onlyOwner {
-        if (block.timestamp <= launchTime + 365 days) revert EMG_WAIT_1Y();
-        if (stakingContract != address(0) && _isContract(stakingContract)) revert STAKING_ACTIVE_LOCKS();
-        
-        uint256 locked = lockedForStaking[user];
-        if (locked > 0) {
-            lockedForStaking[user] = 0;
-            totalLockedForStaking -= locked;
-            emit TokensUnlockedFromStaking(user, locked);
+        if (exemptAddress != address(0)) {
+            circuitBreakerExempt[exemptAddress] = exemptStatus;
+            emit CircuitBreakerExemptionUpdated(exemptAddress, exemptStatus);
         }
     }
+
+
 
     // ============================================
     // INTERNAL STUFF - For Our Eyes Only
@@ -2596,8 +2588,6 @@ contract NTE is IERC20 {
         
         uint256 fromBalance = _balances[from];
         if (fromBalance < amount) revert TXN_EXCEEDS_BAL();
-        uint256 locked = lockedForStaking[from];
-        if (fromBalance - amount < locked) revert TXN_EXCEEDS_BAL();
         unchecked {
             _balances[from] = fromBalance - amount;
             _balances[to] += amount;
@@ -2787,14 +2777,25 @@ contract NTE is IERC20 {
         if (amount == 0) revert TXN_AMOUNT_ZERO();
         if (from == address(0)) revert ADDR_FROM_ZERO();
         if (to == address(0)) revert ADDR_TO_ZERO();
+
+        // Circuit Breaker check
+        if (circuitBreakerThresholdBps > 0 && !circuitBreakerExempt[from] && !circuitBreakerExempt[to]) {
+            uint256 threshold = (_totalSupply * circuitBreakerThresholdBps) / BASIS_POINTS;
+            if (amount > threshold) {
+                _paused = true;
+                emit CircuitBreakerTripped(from, amount, threshold);
+                revert SYS_DISABLED();
+            }
+        }
+
         bool isHelperBypassFlow = (helperBypass[msg.sender] && from == msg.sender);
         
-        // If we're paused, everything stops (unless you're the owner)
+        // If we're paused, everything stops (unless you're the owner/governance)
         if (_paused) {
             if (pauseIncludesOwner) {
                 revert SYS_DISABLED();
             } else {
-                if (from != _owner && to != _owner && msg.sender != _owner) revert SYS_DISABLED();
+                if (!hasRole[GOVERNANCE_ROLE][from] && !hasRole[GOVERNANCE_ROLE][to] && !hasRole[GOVERNANCE_ROLE][msg.sender]) revert SYS_DISABLED();
             }
         }
 
@@ -2807,7 +2808,7 @@ contract NTE is IERC20 {
 
             // Optional whitelist enforcement for helper-bypass transfers.
             if (whitelistEnabled && enforceWhitelistOnHelper) {
-                if (!(from == _owner || to == _owner || msg.sender == _owner ||
+                if (!(hasRole[GOVERNANCE_ROLE][from] || hasRole[GOVERNANCE_ROLE][to] || hasRole[GOVERNANCE_ROLE][msg.sender] ||
                     isWhitelistedActive(from) || isWhitelistedActive(to) || isWhitelistedActive(msg.sender) ||
                     from == address(this) || to == address(this))) {
                     revert WL_REQUIRED();
@@ -2819,7 +2820,7 @@ contract NTE is IERC20 {
         
         // Launch day shields - very strict for the first hour or so
         if (antiBotEnabled && block.timestamp < launchTime + antiBotDuration) {
-            if (!(from == _owner || to == _owner || msg.sender == _owner || taxExempt[from] || taxExempt[to] || taxExempt[msg.sender])) {
+            if (!(hasRole[GOVERNANCE_ROLE][from] || hasRole[GOVERNANCE_ROLE][to] || hasRole[GOVERNANCE_ROLE][msg.sender] || taxExempt[from] || taxExempt[to] || taxExempt[msg.sender])) {
                 revert SEC_BOT_ACTIVE();
             }
         }
@@ -2829,14 +2830,14 @@ contract NTE is IERC20 {
         if (isBlacklistedActive(msg.sender) && msg.sender != from) revert BL_SENDER();
         
         if (whitelistEnabled) {
-            if (!(from == _owner || to == _owner || msg.sender == _owner ||
+            if (!(hasRole[GOVERNANCE_ROLE][from] || hasRole[GOVERNANCE_ROLE][to] || hasRole[GOVERNANCE_ROLE][msg.sender] ||
                 isWhitelistedActive(from) || isWhitelistedActive(to) || isWhitelistedActive(msg.sender) ||
                 from == address(this) || to == address(this))) {
                 revert WL_REQUIRED();
             }
         }
         
-        if (velocityLimitEnabled && !velocityLimitExempt[from] && from != _owner && from != address(this)) {
+        if (velocityLimitEnabled && !velocityLimitExempt[from] && !hasRole[GOVERNANCE_ROLE][from] && from != address(this)) {
             _checkVelocityLimit(from);
         }
         
@@ -2918,8 +2919,8 @@ contract NTE is IERC20 {
         
         // Final step: Move the tokens (and take tax if applicable)
         if (
-            from == _owner ||
-            to == _owner ||
+            hasRole[GOVERNANCE_ROLE][from] ||
+            hasRole[GOVERNANCE_ROLE][to] ||
             from == address(this) ||
             to == address(this) ||
             taxExempt[from] ||
@@ -3128,33 +3129,24 @@ contract NTE is IERC20 {
      * @custom:note Caller must set pancakeRouter separately and emit appropriate events
      */
     function _initializeDexPair(address _router) internal {
-        try IPancakeRouter(_router).factory() returns (address factory) {
-            if (factory == address(0)) revert DEX_FACTORY_ZERO();
-            if (!_isContract(factory)) revert DEX_FACTORY();
+        address factory = IPancakeRouter(_router).factory();
+        if (factory == address(0)) revert DEX_FACTORY_ZERO();
+        if (!_isContract(factory)) revert DEX_FACTORY();
 
-            try IPancakeRouter(_router).WETH() returns (address weth) {
-                if (weth == address(0)) revert DEX_WETH_ZERO();
-                if (!_isContract(weth)) revert DEX_WETH();
+        address weth = IPancakeRouter(_router).WETH();
+        if (weth == address(0)) revert DEX_WETH_ZERO();
+        if (!_isContract(weth)) revert DEX_WETH();
 
-                try IPancakeFactory(factory).getPair(address(this), weth) returns (address existingPair) {
-                    if (existingPair != address(0)) {
-                        pancakePair = existingPair;
-                    } else {
-                        address newPair = IPancakeFactory(factory).createPair(address(this), weth);
-                        if (newPair == address(0)) revert DEX_PAIR_ZERO();
-                        pancakePair = newPair;
-                    }
-                    isPancakePair[pancakePair] = true;
-                    if (pancakePair == address(0)) revert DEX_PAIR_FAIL();
-                } catch {
-                    revert DEX_PAIR_CHECK();
-                }
-            } catch {
-                revert DEX_WETH_CALL();
-            }
-        } catch {
-            revert DEX_FACTORY_CALL();
+        address existingPair = IPancakeFactory(factory).getPair(address(this), weth);
+        if (existingPair != address(0)) {
+            pancakePair = existingPair;
+        } else {
+            address newPair = IPancakeFactory(factory).createPair(address(this), weth);
+            if (newPair == address(0)) revert DEX_PAIR_ZERO();
+            pancakePair = newPair;
         }
+        isPancakePair[pancakePair] = true;
+        if (pancakePair == address(0)) revert DEX_PAIR_FAIL();
     }
 
     /**
