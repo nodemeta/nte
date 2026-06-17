@@ -2784,7 +2784,6 @@ contract NTE is IERC20 {
         if (circuitBreakerThresholdBps > 0 && !circuitBreakerExempt[from] && !circuitBreakerExempt[to]) {
             uint256 threshold = (_totalSupply * circuitBreakerThresholdBps) / BASIS_POINTS;
             if (amount > threshold) {
-                _paused = true;
                 emit CircuitBreakerTripped(from, amount, threshold);
                 revert SYS_DISABLED();
             }
