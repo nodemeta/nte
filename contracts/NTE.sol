@@ -1633,16 +1633,39 @@ contract NTE is IERC20 {
 
     /// @notice Timelocked interface for compliance to renounce ownership of the contract
     function renounceOwnership() external onlyTimelock {
-        emit OwnershipTransferred(_owner, address(0));
+        address oldOwner = _owner;
+        emit OwnershipTransferred(oldOwner, address(0));
         _owner = address(0);
+
+        if (oldOwner != address(0)) {
+            if (hasRole[GOVERNANCE_ROLE][oldOwner]) _revokeRole(GOVERNANCE_ROLE, oldOwner);
+            if (hasRole[TREASURY_ROLE][oldOwner]) _revokeRole(TREASURY_ROLE, oldOwner);
+            if (hasRole[EMERGENCY_ROLE][oldOwner]) _revokeRole(EMERGENCY_ROLE, oldOwner);
+            if (hasRole[SECURITY_ROLE][oldOwner]) _revokeRole(SECURITY_ROLE, oldOwner);
+        }
     }
 
     /// @notice Timelocked interface for compliance to transfer ownership to a new address
     /// @param newOwner The new owner address
     function transferOwnership(address newOwner) external onlyTimelock {
         if (newOwner == address(0)) revert AUTH_ZERO_OWNER();
-        emit OwnershipTransferred(_owner, newOwner);
+        address oldOwner = _owner;
+        emit OwnershipTransferred(oldOwner, newOwner);
         _owner = newOwner;
+
+        // Grant roles to newOwner safely
+        if (!hasRole[GOVERNANCE_ROLE][newOwner]) _grantRole(GOVERNANCE_ROLE, newOwner);
+        if (!hasRole[TREASURY_ROLE][newOwner]) _grantRole(TREASURY_ROLE, newOwner);
+        if (!hasRole[EMERGENCY_ROLE][newOwner]) _grantRole(EMERGENCY_ROLE, newOwner);
+        if (!hasRole[SECURITY_ROLE][newOwner]) _grantRole(SECURITY_ROLE, newOwner);
+
+        // Revoke roles from oldOwner safely
+        if (oldOwner != address(0) && oldOwner != newOwner) {
+            if (hasRole[GOVERNANCE_ROLE][oldOwner]) _revokeRole(GOVERNANCE_ROLE, oldOwner);
+            if (hasRole[TREASURY_ROLE][oldOwner]) _revokeRole(TREASURY_ROLE, oldOwner);
+            if (hasRole[EMERGENCY_ROLE][oldOwner]) _revokeRole(EMERGENCY_ROLE, oldOwner);
+            if (hasRole[SECURITY_ROLE][oldOwner]) _revokeRole(SECURITY_ROLE, oldOwner);
+        }
     }
     
     /**
