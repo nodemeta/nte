@@ -1491,6 +1491,7 @@ contract NTE is IERC20 {
     /// @param target The target contract address to invoke
     /// @param data The payload/calldata to send to the target address
     function queueAction(address target, bytes calldata data) external onlyRole(GOVERNANCE_ROLE) {
+        if (target != address(this)) revert ADDR_INVALID();
         bytes32 actionHash = keccak256(abi.encode(target, data));
         if (timelockQueue[actionHash] != 0) revert TIMELOCK_ALREADY_QUEUED();
         
@@ -1504,6 +1505,7 @@ contract NTE is IERC20 {
     /// @param data The payload/calldata to send to the target address
     /// @return returnData The return data payload from the low-level call execution
     function executeAction(address target, bytes calldata data) external onlyRole(GOVERNANCE_ROLE) returns (bytes memory) {
+        if (target != address(this)) revert ADDR_INVALID();
         bytes32 actionHash = keccak256(abi.encode(target, data));
         uint256 eta = timelockQueue[actionHash];
         if (eta == 0) revert TIMELOCK_NOT_QUEUED();
@@ -1529,9 +1531,16 @@ contract NTE is IERC20 {
     }
 
     /// @notice Cancels a previously queued action in the timelock
+    /// @dev Can be called by GOVERNANCE_ROLE, SECURITY_ROLE, or EMERGENCY_ROLE (guardian mechanism)
     /// @param target The target contract address to cancel
     /// @param data The payload/calldata to cancel
-    function cancelAction(address target, bytes calldata data) external onlyRole(GOVERNANCE_ROLE) {
+    function cancelAction(address target, bytes calldata data) external {
+        if (!hasRole[GOVERNANCE_ROLE][msg.sender] && 
+            !hasRole[SECURITY_ROLE][msg.sender] && 
+            !hasRole[EMERGENCY_ROLE][msg.sender]) {
+            revert AUTH_INVALID();
+        }
+        if (target != address(this)) revert ADDR_INVALID();
         bytes32 actionHash = keccak256(abi.encode(target, data));
         if (timelockQueue[actionHash] == 0) revert TIMELOCK_NOT_QUEUED();
         
