@@ -1555,12 +1555,13 @@ contract NTE is IERC20 {
         _setAllTaxBasisPoints(newBuy, newSell, newXfer);
     }
 
-    /// @notice Timelocked interface to configure automated liquidity collection parameters
+    /// @notice Timelocked interface to configure automated liquidity collection parameters with force-override
     /// @param enabled True to enable automated liquidity conversion, false to disable
     /// @param percentageBps The portion of collected tax sent to the liquidity pool (in basis points)
     /// @param collector The address designated to collect liquidity tokens
-    function configureAutoLiquidity(bool enabled, uint256 percentageBps, address collector) external onlyTimelock {
-        _configureAutoLiquidity(enabled, percentageBps, collector);
+    /// @param force True to bypass the balance check on the old collector
+    function configureAutoLiquidity(bool enabled, uint256 percentageBps, address collector, bool force) external onlyTimelock {
+        _configureAutoLiquidity(enabled, percentageBps, collector, force);
     }
 
     /// @notice Timelocked interface to update the protocol treasury wallet
@@ -1764,7 +1765,8 @@ contract NTE is IERC20 {
     function _configureAutoLiquidity(
         bool enabled,
         uint256 percentageBps,
-        address collector
+        address collector,
+        bool force
     ) internal {
         if (!enabled) {
             autoLiquidityEnabled = false;
@@ -1777,7 +1779,7 @@ contract NTE is IERC20 {
         if (!_isContract(collector)) revert ADDR_NOT_CONTRACT();
 
         address oldCollector = liquidityCollector;
-        if (oldCollector != address(0) && oldCollector != collector && balanceOf(oldCollector) > 0) {
+        if (!force && oldCollector != address(0) && oldCollector != collector && balanceOf(oldCollector) > 0) {
             revert LIQ_COLLECTOR_HAS_BALANCE();
         }
 
