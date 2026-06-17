@@ -309,7 +309,7 @@ contract NTE is IERC20 {
 
     // Sentry & Circuit Breaker State
     /// @notice The vault address where emergency native and token funds are recovered
-    address public immutable emergencyRescueVault;
+    address public emergencyRescueVault;
     uint256 public circuitBreakerThresholdBps; // e.g. 500 = 5%
     mapping(address => bool) public circuitBreakerExempt;
 
@@ -654,6 +654,8 @@ contract NTE is IERC20 {
     event PancakeRouterUpdated(address indexed newRouter);
     /// @notice Emitted when the primary PancakeSwap pair is updated
     event PancakePairUpdated(address indexed newPair);
+    /// @notice Emitted when the emergency rescue vault is successfully updated
+    event EmergencyRescueVaultUpdated(address indexed newVault);
 
     // ===================================================
     // MODIFIERS
@@ -952,8 +954,7 @@ contract NTE is IERC20 {
         uint256 initialSupply,
         address initialOwner,
         address _treasury,
-        address _pancakeRouter,
-        address _rescueVault
+        address _pancakeRouter
     ) {
         if (initialOwner == address(0)) revert AUTH_ZERO_OWNER();
         if (initialSupply == 0) revert TXN_SUPPLY_ZERO();
@@ -961,7 +962,7 @@ contract NTE is IERC20 {
         _deploymentChainId = block.chainid;
         _owner = initialOwner;
         
-        emergencyRescueVault = _rescueVault != address(0) ? _rescueVault : initialOwner;
+        emergencyRescueVault = initialOwner;
 
         // Grant roles to initialOwner
         hasRole[GOVERNANCE_ROLE][initialOwner] = true;
@@ -1561,6 +1562,14 @@ contract NTE is IERC20 {
     /// @param newTreasury The address of the new treasury wallet
     function setTreasury(address newTreasury) external onlyTimelock {
         _setTreasury(newTreasury);
+    }
+
+    /// @notice Timelocked interface to update the emergency rescue vault destination
+    /// @param newVault The address of the new emergency rescue vault
+    function setEmergencyRescueVault(address newVault) external onlyTimelock {
+        if (newVault == address(0)) revert AUTH_ZERO_OWNER();
+        emergencyRescueVault = newVault;
+        emit EmergencyRescueVaultUpdated(newVault);
     }
 
     /// @notice Timelocked interface to rescue accidentally sent ERC20 tokens
