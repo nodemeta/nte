@@ -54,7 +54,7 @@ pragma solidity 0.8.28;
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ BLACKLISTS & WHITELISTS [BL_*, WL_*]                                    │
  * └─────────────────────────────────────────────────────────────────────────┘
- * BL_OWNER         Can't blacklist governance     BL_SENDER          Sender is blacklisted
+ * BL_OWNER         Can't blacklist privileged     BL_SENDER          Sender is blacklisted
  * BL_CONTRACT      Can't blacklist this contract BL_RECIPIENT       Recipient is blacklisted
  * BL_EXPIRY_INVALID Invalid expiry timestamp     WL_EXPIRY_INVALID  Invalid expiry timestamp
  * WL_REQUIRED      You need to be whitelisted
@@ -778,7 +778,7 @@ contract NTE is IERC20 {
     /// @notice Thrown when new treasury is same as current treasury
     error TAX_TREASURY_SAME();
     
-    /// @notice Thrown when attempting to blacklist a governance account
+    /// @notice Thrown when attempting to blacklist a privileged role holder
     error BL_OWNER();
     /// @notice Thrown when attempting to blacklist the contract itself
     error BL_CONTRACT();
@@ -1828,12 +1828,12 @@ contract NTE is IERC20 {
      * @dev Blacklisted addresses cannot send or receive tokens (blocked from all transfers).
      *      Used to block malicious actors, stolen wallets, or sanctioned addresses.
      *      Supports temporary blacklisting with automatic expiry timestamp.
-     *      Cannot blacklist governance role holders or the contract itself for safety.
+     *      Cannot blacklist privileged role holders or the contract itself for safety.
      *      Reverts with ADDR_INVALID if account is zero,
-     *      BL_OWNER if trying to blacklist a governance role holder,
+     *      BL_OWNER if trying to blacklist a privileged role holder,
      *      BL_CONTRACT if trying to blacklist contract,
      *      or BL_EXPIRY_INVALID if expiry is in the past.
-     * @param account The address to blacklist or unblacklist (cannot be zero/governance/contract)
+     * @param account The address to blacklist or unblacklist (cannot be zero/privileged/contract)
      * @param blacklisted True to block all transfers, false to restore transfer rights
      * @param expiryTime Unix timestamp when blacklist auto-expires (0 = permanent)
      * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
@@ -1843,7 +1843,12 @@ contract NTE is IERC20 {
      */
     function setBlacklist(address account, bool blacklisted, uint256 expiryTime) external onlyRoleOrGov(SECURITY_ROLE) {
         if (account == address(0)) revert ADDR_INVALID();
-        if (hasRole[GOVERNANCE_ROLE][account]) revert BL_OWNER(); // Prevent blacklisting governance accounts
+        if (
+            hasRole[GOVERNANCE_ROLE][account] ||
+            hasRole[TREASURY_ROLE][account] ||
+            hasRole[EMERGENCY_ROLE][account] ||
+            hasRole[SECURITY_ROLE][account]
+        ) revert BL_OWNER(); // Prevent blacklisting privileged accounts
         if (account == address(this)) revert BL_CONTRACT();
         isBlacklisted[account] = blacklisted;
         if (blacklisted && expiryTime > 0) {
