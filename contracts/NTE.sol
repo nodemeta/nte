@@ -954,24 +954,35 @@ contract NTE is IERC20 {
         uint256 initialSupply,
         address initialOwner,
         address _treasury,
-        address _pancakeRouter
+        address _pancakeRouter,
+        address _governanceAdmin,
+        address _treasuryAdmin,
+        address _emergencyAdmin,
+        address _securityAdmin
     ) {
         if (initialOwner == address(0)) revert AUTH_ZERO_OWNER();
         if (initialSupply == 0) revert TXN_SUPPLY_ZERO();
+        if (
+            _governanceAdmin == address(0) ||
+            _treasuryAdmin == address(0) ||
+            _emergencyAdmin == address(0) ||
+            _securityAdmin == address(0)
+        ) revert ADDR_INVALID();
         
         _deploymentChainId = block.chainid;
         _owner = initialOwner;
         
         emergencyRescueVault = initialOwner;
 
-        // Grant roles to initialOwner
-        hasRole[GOVERNANCE_ROLE][initialOwner] = true;
-        hasRole[TREASURY_ROLE][initialOwner] = true;
-        hasRole[EMERGENCY_ROLE][initialOwner] = true;
-        hasRole[SECURITY_ROLE][initialOwner] = true;
+        // Grant roles to respective admin addresses
+        hasRole[GOVERNANCE_ROLE][_governanceAdmin] = true;
+        hasRole[TREASURY_ROLE][_treasuryAdmin] = true;
+        hasRole[EMERGENCY_ROLE][_emergencyAdmin] = true;
+        hasRole[SECURITY_ROLE][_securityAdmin] = true;
 
         circuitBreakerThresholdBps = 500;
         circuitBreakerExempt[initialOwner] = true;
+        circuitBreakerExempt[_governanceAdmin] = true;
         circuitBreakerExempt[address(this)] = true;
 
 
