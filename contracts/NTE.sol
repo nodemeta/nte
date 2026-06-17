@@ -1801,7 +1801,7 @@ contract NTE is IERC20 {
      * @custom:usage Grant to: routers, pairs, liquidity managers, authorized contracts
      * @custom:emit TaxExemptUpdated event
      */
-    function setTaxExempt(address user, bool exempt) external onlyRoleOrGov(SECURITY_ROLE) {
+    function setTaxExempt(address user, bool exempt) external onlyRoleOrGov(TREASURY_ROLE) {
         if (user == address(0)) revert ADDR_INVALID();
         taxExempt[user] = exempt;
         emit TaxExemptUpdated(user, exempt);
@@ -1944,7 +1944,7 @@ contract NTE is IERC20 {
      * @custom:protection Prevents whale dumps that could crash token price
      * @custom:emit AntiDumpConfigUpdated event with all three parameters
      */
-    function setAntiDumpConfig(bool enabled, uint256 maxPercentage, uint256 cooldownTime) external onlyRoleOrGov(SECURITY_ROLE) {
+    function setAntiDumpConfig(bool enabled, uint256 maxPercentage, uint256 cooldownTime) external onlyRoleOrGov(TREASURY_ROLE) {
         if (maxPercentage == 0 || maxPercentage > MAX_ANTI_DUMP_PERCENT) revert DUMP_PERCENT();
         if (cooldownTime > MAX_ANTI_DUMP_COOLDOWN) revert CD_TOO_HIGH();
         antiDumpEnabled = enabled;
@@ -2201,7 +2201,7 @@ contract NTE is IERC20 {
      * @custom:usage Typically used for category helper and liquidity manager contracts
      * @custom:emit HelperBypassUpdated event
      */
-    function setHelperBypass(address helper, bool enabled) external onlyRoleOrGov(SECURITY_ROLE) {
+    function setHelperBypass(address helper, bool enabled) external onlyRoleOrGov(TREASURY_ROLE) {
         if (helper == address(0)) revert ADDR_INVALID();
         if (enabled && !_isContract(helper)) revert ADDR_NOT_CONTRACT();
         helperBypass[helper] = enabled;
@@ -2511,7 +2511,7 @@ contract NTE is IERC20 {
      * @custom:conditional Only relevant when whitelistEnabled is true
      * @custom:emit HelperWhitelistEnforcementUpdated event
      */
-    function setHelperWhitelistEnforcement(bool enabled) external onlyRoleOrGov(SECURITY_ROLE) {
+    function setHelperWhitelistEnforcement(bool enabled) external onlyRoleOrGov(TREASURY_ROLE) {
         enforceWhitelistOnHelper = enabled;
         emit HelperWhitelistEnforcementUpdated(enabled);
     }    // Circuit Breaker Internal Helper
