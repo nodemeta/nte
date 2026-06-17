@@ -1682,7 +1682,7 @@ contract NTE is IERC20 {
         netOutput = amount - taxAmount;
         
         // 2. Calculate Price Impact
-        impactBps = _calculatePriceImpact(amount, pancakePair);
+        impactBps = _calculatePriceImpact(amount, pancakePair, sellTaxBps);
         
         return (netOutput, taxAmount, impactBps);
     }
@@ -2901,7 +2901,15 @@ contract NTE is IERC20 {
         }
         
         if (priceImpactLimitEnabled && isToPair && !priceImpactExempt[from]) {
-            uint256 priceImpact = _calculatePriceImpact(amount, to);
+            uint256 effectiveTaxBps = (
+                hasRole[GOVERNANCE_ROLE][from] ||
+                hasRole[GOVERNANCE_ROLE][to] ||
+                from == address(this) ||
+                to == address(this) ||
+                taxExempt[from] ||
+                taxExempt[to]
+            ) ? 0 : sellTaxBps;
+            uint256 priceImpact = _calculatePriceImpact(amount, to, effectiveTaxBps);
             if (priceImpact > maxPriceImpactPercent) revert PRICE_TOO_HIGH();
         }
         
@@ -3034,12 +3042,13 @@ contract NTE is IERC20 {
      *      Returns BASIS_POINTS (100%) if reserves are invalid.
      * @param amount The amount of tokens being sold (before tax)
      * @param pair The liquidity pair address to calculate impact against
+     * @param taxBps The tax rate to factor in (effective tax rate of the sender)
      * @return impact The price impact in basis points where 100 = 1%, max 10000 = 100%
      * @custom:formula outputImpact = (idealOutput - actualOutput) / idealOutput * BASIS_POINTS
-     * @custom:assumptions Factors in sellTaxBps and DEX_FEE_BPS (25 = 0.25%) before calculation
+     * @custom:assumptions Factors in taxBps and DEX_FEE_BPS (25 = 0.25%) before calculation
      * @custom:safety Returns 0 if pair/amount is invalid, returns BASIS_POINTS if reserves are zero
      */
-    function _calculatePriceImpact(uint256 amount, address pair) internal view returns (uint256 impact) {
+    function _calculatePriceImpact(uint256 amount, address pair, uint256 taxBps) internal view returns (uint256 impact) {
         if (pair == address(0) || amount == 0) return 0;
 
         (uint256 reserve0, uint256 reserve1, ) = IPancakePair(pair).getReserves();
@@ -3056,8 +3065,8 @@ contract NTE is IERC20 {
 
         if (reserveToken == 0 || reserveOther == 0) return BASIS_POINTS;
 
-        // Factor in the sell tax first
-        uint256 taxAmount = (amount * sellTaxBps) / BASIS_POINTS;
+        // Factor in the tax first
+        uint256 taxAmount = (amount * taxBps) / BASIS_POINTS;
         uint256 amountAfterTax = amount - taxAmount;
         
         // Then factor in the DEX fee
