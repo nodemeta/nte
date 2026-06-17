@@ -54,7 +54,7 @@ pragma solidity 0.8.28;
  * ┌─────────────────────────────────────────────────────────────────────────┐
  * │ BLACKLISTS & WHITELISTS [BL_*, WL_*]                                    │
  * └─────────────────────────────────────────────────────────────────────────┘
- * BL_OWNER         Can't blacklist the owner     BL_SENDER          Sender is blacklisted
+ * BL_OWNER         Can't blacklist governance     BL_SENDER          Sender is blacklisted
  * BL_CONTRACT      Can't blacklist this contract BL_RECIPIENT       Recipient is blacklisted
  * BL_EXPIRY_INVALID Invalid expiry timestamp     WL_EXPIRY_INVALID  Invalid expiry timestamp
  * WL_REQUIRED      You need to be whitelisted
@@ -126,13 +126,6 @@ pragma solidity 0.8.28;
  * └─────────────────────────────────────────────────────────────────────────┘
  * ADDR_INVALID     Address is invalid or zero    ADDR_ZERO          Zero address not allowed
  * ADDR_NOT_CONTRACT Address isn't a contract
- *
- * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ STAKING [STAKING_*]                                                     │
- * └─────────────────────────────────────────────────────────────────────────┘
- * STAKING_NOT_CONTRACT Staking address isn't a contract
- * STAKING_ACTIVE_LOCKS Cannot change staking contract with active locks
- *
  *
  * ═══════════════════════════════════════════════════════════════════════════
  * EVENT MESSAGE CODES
@@ -252,7 +245,7 @@ interface IERC20 {
  *      - Anti-dump mechanisms (sell limits and cooldowns)
  *      - Velocity limits (transaction frequency controls)
  *      - Categorized transactions (off-chain signed payments with categories)
- *      - Staking integration (token locking for staking rewards)
+
  *      - Whitelist/Blacklist system (access control)
  *      - Two-step ownership transfer (safe ownership changes)
  *      - Emergency functions (safety mechanisms with time locks)
@@ -261,7 +254,7 @@ interface IERC20 {
  *      - Reentrancy guards on critical functions
  *      - Overflow protection with Solidity 0.8.28
  *      - Multi-layer bot protection (anti-bot, MEV, velocity)
- *      - Time-locked emergency functions (30 days for BNB, 1 year for staking)
+ *      - Time-locked emergency functions (30 days for BNB)
  *      - Signature replay protection (nonces and deadline validation)
  * 
  * @custom:tax-system
@@ -491,7 +484,7 @@ contract NTE is IERC20 {
     /// @notice Safety rule: taxes can only be changed once every 24 hours
     uint256 private constant TAX_CHANGE_COOLDOWN = 1 days;
     
-    /// @notice Whether even the owner is blocked when the contract is paused
+    /// @notice Whether even governance accounts are blocked when the contract is paused
     bool public pauseIncludesOwner;
     
     
@@ -686,7 +679,7 @@ contract NTE is IERC20 {
         _;
     }
 
-    /// @notice Restricts function access to the contract owner
+    /// @notice Restricts function access to accounts with the specified role.
     modifier onlyRole(bytes32 role) {
         _checkRole(role);
         _;
@@ -785,7 +778,7 @@ contract NTE is IERC20 {
     /// @notice Thrown when new treasury is same as current treasury
     error TAX_TREASURY_SAME();
     
-    /// @notice Thrown when attempting to blacklist the owner
+    /// @notice Thrown when attempting to blacklist a governance account
     error BL_OWNER();
     /// @notice Thrown when attempting to blacklist the contract itself
     error BL_CONTRACT();
@@ -931,14 +924,14 @@ contract NTE is IERC20 {
      * @dev Constructor performs comprehensive setup in the following order:
      *      1. Validates critical parameters (owner and supply cannot be zero)
      *      2. Sets up ownership and basic token properties (name, symbol, decimals)
-     *      3. Configures treasury address (defaults to owner if not specified)
+     *      3. Configures treasury address (defaults to initialOwner if not specified)
      *      4. Establishes default tax rates: 2% buy, 2% sell, 3% transfer
      *      5. Initializes DEX integration (if router provided)
      *      6. Configures anti-dump and price impact protections
      *      7. Enables MEV protection with conservative defaults
      *      8. Sets up velocity limits (10 tx per 5 minutes)
      *      9. Records deployment timestamp for timelocks
-     *      10. Mints initial supply to owner
+     *      10. Mints initial supply to initialOwner
      *      
      *      Reverts with AUTH_ZERO_OWNER if initialOwner is zero address.
      *      Reverts with TXN_SUPPLY_ZERO if initialSupply is zero.
@@ -946,7 +939,7 @@ contract NTE is IERC20 {
      * 
      * @param initialSupply The initial token supply WITHOUT decimals (will be multiplied by 10^18)
      * @param initialOwner The address receiving initial supply and admin privileges (cannot be zero)
-     * @param _treasury The address where tax proceeds are sent (zero address defaults to owner)
+     * @param _treasury The address where tax proceeds are sent (zero address defaults to initialOwner)
      * @param _pancakeRouter The PancakeSwap V2 router address for DEX integration (zero address skips DEX setup)
      * 
      * @custom:deployment Deploy with appropriate values for target chain (BSC mainnet/testnet)
@@ -1069,11 +1062,11 @@ contract NTE is IERC20 {
     
     /**
      * @notice Returns the token balance of a specific address.
-     * @dev Returns the amount from _balances mapping minus any locked staking tokens.
-     *      The returned balance is freely transferable (excluding staked amounts).
+     * @dev Returns the amount from the _balances mapping.
+     *      The returned balance is freely transferable.
      * @param account The address to query the balance for
      * @return balance The amount of tokens held by the account (in base units with 18 decimals)
-     * @custom:note Balance doesn't include tokens locked in staking contract
+     *
      */
     function balanceOf(address account) public view override returns (uint256) {
         return _balances[account];
@@ -1272,7 +1265,7 @@ contract NTE is IERC20 {
      *      Reverts with CAT_INVALID if category ID is out of bounds.
      * @param category The category ID to update (must be less than totalCategories)
      * @param enabled True to allow transactions in this category, false to block
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:emit CategoryStatusUpdated event
      */
     function setCategoryEnabled(uint8 category, bool enabled) external onlyRoleOrGov(SECURITY_ROLE) {
@@ -1288,7 +1281,7 @@ contract NTE is IERC20 {
      *      or STR_TOO_LONG if name exceeds MAX_STRING_LENGTH (64 characters).
      * @param category The category ID to rename (must be less than totalCategories)
      * @param newName The new display name for this category (1-64 characters)
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:validation Name must be non-empty and within length limits
      * @custom:emit CategoryUpdated event
      */
@@ -1309,7 +1302,7 @@ contract NTE is IERC20 {
      *      or CAT_INVALID if already at maximum category count.
      * @param categoryName The display name for the new category (1-64 characters)
      * @return categoryId The newly assigned category ID (0-254)
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:effects Increments totalCategories counter and enables new category
      * @custom:emit CategoryAdded event with new ID and name
      */
@@ -1333,7 +1326,7 @@ contract NTE is IERC20 {
      *      Only authorized signers can create valid signatures for transactionFrom calls.
      *      Reverts with ADDR_ZERO if address is zero, or AUTH_ALREADY_SET if already authorized.
      * @param authAddress The backend service or signer address to authorize (cannot be zero)
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:security Store private keys in secure infrastructure (HSM/KMS recommended)
      * @custom:emit AuthSignerAdded event
      */
@@ -1350,7 +1343,7 @@ contract NTE is IERC20 {
      *      Previously signed but unexecuted transactions will fail validation.
      *      Reverts with AUTH_NOT_SET if address was not previously authorized.
      * @param authAddress The signer address to remove from authorized list
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:effect Immediately blocks all new signatures from this address
      * @custom:emit AuthSignerRemoved event
      */
@@ -1365,7 +1358,7 @@ contract NTE is IERC20 {
      * @dev Destroys tokens by transferring them to the zero address and reducing total supply.
      *      Burned tokens are tracked in the totalBurned counter for transparency.
      *      This is a one-way operation - burned tokens cannot be recovered.
-     *      Caller must have sufficient unlocked balance (not staked) to burn.
+     *      Caller must have sufficient balance to burn.
      *      Reverts with BURN_FROM_ZERO if caller is zero address (impossible in practice),
      *      or BURN_EXCEEDS if amount exceeds caller's available balance.
      * @param amount The number of tokens to permanently destroy (in base units with 18 decimals)
@@ -1393,14 +1386,14 @@ contract NTE is IERC20 {
     }
     
     /**
-     * @notice Returns the address of the current contract owner with admin privileges.
+     * @notice Returns the address of the current contract owner.
      * @dev Returns the _owner state variable which can be zero address if ownership
-     *      has been renounced via renounceOwnership(). Owner has exclusive access to
-     *      all admin functions (onlyOwner modifier), including pause, tax changes,
-     *      blacklist management, and configuration updates.
+     *      has been renounced via renounceOwnership(). The owner address also holds
+     *      governance and other administrative roles unless ownership is transferred or renounced.
+     *
      * @return ownerAddress The address of current owner, or zero address if ownership renounced
      * @custom:view Read-only function with no state modifications or gas cost
-     * @custom:governance Owner controls all admin functions and protocol parameters
+     * @custom:governance Governance and administrative actions are controlled by roles (GOVERNANCE_ROLE, TREASURY_ROLE, EMERGENCY_ROLE, SECURITY_ROLE)
      * @custom:renouncement Returns zero address if ownership has been permanently renounced
      */
     function owner() external view returns (address) {
@@ -1456,7 +1449,7 @@ contract NTE is IERC20 {
      *      Used during security incidents, upgrades, or critical issues.
      * @param includeOwner If true, owner is also blocked; if false, owner can still transfer
      * @custom:security Emergency brake for critical issues or security incidents
-     * @custom:access Only callable by contract owner via onlyOwner modifier
+     * @custom:access Restricted to EMERGENCY_ROLE or GOVERNANCE_ROLE holders
      * @custom:effect Blocks all transfers except potentially owner (based on flag)
      * @custom:emit Paused event with msg.sender
      */
@@ -1721,7 +1714,7 @@ contract NTE is IERC20 {
      * @param newBuyTaxBps New tax rate for buy transactions (0-2500, max 25%)
      * @param newSellTaxBps New tax rate for sell transactions (0-2500, max 25%)
      * @param newTransferTaxBps New tax rate for wallet-to-wallet transfers (0-2500, max 25%)
-     * @custom:access Only callable by contract owner
+     * @custom:access Internal — invoked only via timelocked self-call (onlyTimelock)
      * @custom:validation Multiple limits prevent sudden tax changes and protect investors
      * @custom:cooldown 24-hour cooldown between tax adjustments
      * @custom:emit TaxRatesUpdated event with all three new rates
@@ -1779,7 +1772,7 @@ contract NTE is IERC20 {
      * @param enabled True to enable tax routing to liquidity manager, false to disable (all to treasury)
      * @param percentageBps Percentage of tax to route to collector in basis points (100 = 1%, 3000 = 30%)
      * @param collector Address of liquidity manager contract (must be contract, not EOA)
-     * @custom:access Only callable by contract owner
+     * @custom:access Internal — invoked only via timelocked self-call (onlyTimelock)
      * @custom:bypass Collector must have helperBypass set via setHelperBypass() to operate freely
      * @custom:migration When switching collectors, old collector must withdraw all tokens first
      * @custom:usage Ideal for: auto-liquidity, buyback-and-LP, protocol-owned liquidity (POL)
@@ -1820,7 +1813,7 @@ contract NTE is IERC20 {
      *      Reverts with ADDR_INVALID if user is zero address.
      * @param user The address to grant or revoke tax exemption (cannot be zero)
      * @param exempt True to exempt from all taxes, false to apply standard tax rates
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to TREASURY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:usage Grant to: routers, pairs, liquidity managers, authorized contracts
      * @custom:emit TaxExemptUpdated event
      */
@@ -1835,15 +1828,15 @@ contract NTE is IERC20 {
      * @dev Blacklisted addresses cannot send or receive tokens (blocked from all transfers).
      *      Used to block malicious actors, stolen wallets, or sanctioned addresses.
      *      Supports temporary blacklisting with automatic expiry timestamp.
-     *      Cannot blacklist owner or contract itself for safety.
+     *      Cannot blacklist governance role holders or the contract itself for safety.
      *      Reverts with ADDR_INVALID if account is zero,
-     *      BL_OWNER if trying to blacklist owner,
+     *      BL_OWNER if trying to blacklist a governance role holder,
      *      BL_CONTRACT if trying to blacklist contract,
      *      or BL_EXPIRY_INVALID if expiry is in the past.
-     * @param account The address to blacklist or unblacklist (cannot be zero/owner/contract)
+     * @param account The address to blacklist or unblacklist (cannot be zero/governance/contract)
      * @param blacklisted True to block all transfers, false to restore transfer rights
      * @param expiryTime Unix timestamp when blacklist auto-expires (0 = permanent)
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:security Prevents scammers, stolen funds movement, and sanctioned addresses
      * @custom:temporary Set expiryTime > 0 for temporary bans that auto-expire
      * @custom:emit BlacklistUpdated and optionally BlacklistExpirySet events
@@ -1870,7 +1863,7 @@ contract NTE is IERC20 {
      *      When disabled, all non-blacklisted addresses can trade freely.
      *      Whitelist status is checked separately via isWhitelistedActive().
      * @param enabled True to restrict trading to whitelisted addresses only, false for open trading
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:usage Common for: private sales, KYC periods, controlled launches
      * @custom:effect When enabled, non-whitelisted addresses cannot trade
      * @custom:emit WhitelistModeUpdated event
@@ -1890,7 +1883,7 @@ contract NTE is IERC20 {
      * @param account The address to whitelist or unwhitelist (cannot be zero)
      * @param whitelisted True to grant trading permission, false to revoke
      * @param expiryTime Unix timestamp when whitelist auto-expires (0 = permanent)
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:usage Grant to: early investors, KYC-verified users, partners
      * @custom:temporary Set expiryTime > 0 for time-limited trading permissions
      * @custom:emit WhitelistUpdated and optionally WhitelistExpirySet events
@@ -1914,7 +1907,7 @@ contract NTE is IERC20 {
      *      Reverts with TAX_TREASURY_ZERO if new address is zero,
      *      or TAX_TREASURY_SAME if address hasn't changed.
      * @param newTreasury The new treasury wallet address (cannot be zero or same as current)
-     * @custom:access Only callable by contract owner
+     * @custom:access Internal — invoked only via timelocked self-call (onlyTimelock)
      * @custom:effect All future tax proceeds will be sent to new treasury address
      * @custom:emit TreasuryUpdated event with new address
      */
@@ -1936,7 +1929,7 @@ contract NTE is IERC20 {
      *      or STR_TOO_LONG if either exceeds 64 characters.
      * @param newName The new full token name (e.g., "Node Meta Energy", 1-64 chars)
      * @param newSymbol The new token ticker symbol (e.g., "NTE", 1-64 chars)
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to GOVERNANCE_ROLE holders
      * @custom:visibility Updates name() and symbol() view functions immediately
      * @custom:emit NameSymbolUpdated event with both new values
      */
@@ -1963,7 +1956,7 @@ contract NTE is IERC20 {
      * @param enabled True to activate anti-dump protection, false to disable
      * @param maxPercentage Maximum % of total supply allowed per sell (in basis points)
      * @param cooldownTime Required seconds to wait between large sells
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to TREASURY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:protection Prevents whale dumps that could crash token price
      * @custom:emit AntiDumpConfigUpdated event with all three parameters
      */
@@ -1985,7 +1978,7 @@ contract NTE is IERC20 {
      *      or PRICE_INVALID if exceeds BASIS_POINTS (100%).
      * @param enabled True to activate price impact limits, false to disable
      * @param maxImpactBasisPoints Maximum allowed price impact (e.g., 500 = 5%)
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:calculation Uses constant product formula: (x+dx)(y-dy) = xy
      * @custom:protection Prevents trades that cause excessive price slippage
      * @custom:emit PriceImpactLimitConfigUpdated event
@@ -2005,7 +1998,7 @@ contract NTE is IERC20 {
      *      Reverts with ADDR_INVALID if account is zero address.
      * @param account The address to update exemption status for (cannot be zero)
      * @param exempt True to exempt from price impact limits, false to apply limits
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:usage Typically granted to liquidity managers or trusted contracts
      * @custom:emit PriceImpactExemptUpdated event
      */
@@ -2022,7 +2015,7 @@ contract NTE is IERC20 {
      *      Reverts with CD_TOO_HIGH if cooldown exceeds MAX_COOLDOWN.
      * @param enabled True to activate wallet cooldown checks, false to disable
      * @param cooldownSeconds Minimum seconds required between transactions per wallet
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:protection Prevents rapid bot trading and front-running attacks
      * @custom:emit WalletCooldownConfigUpdated event
      */
@@ -2040,7 +2033,7 @@ contract NTE is IERC20 {
      *      Reverts with ADDR_INVALID if account is zero address.
      * @param account The address to grant or revoke cooldown exemption (cannot be zero)
      * @param exempt True to bypass cooldown checks, false to apply standard cooldown
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:usage Grant to: exchange hot wallets, trusted high-frequency infrastructure
      * @custom:emit WalletCooldownExemptUpdated event
      */
@@ -2052,7 +2045,7 @@ contract NTE is IERC20 {
     
     /**
      * @notice Emergency function to withdraw stuck ERC20 tokens from this contract.
-     * @dev Allows owner to recover any ERC20 tokens (including NTE itself) that are
+     * @dev Allows timelock to recover any ERC20 tokens (including NTE itself) that are
      *      accidentally sent to the contract or stuck due to protocol issues.
      *      Uses low-level call to handle non-standard ERC20 tokens that don't
      *      return bool values. Validates return data when present.
@@ -2062,7 +2055,7 @@ contract NTE is IERC20 {
      * @param token The address of the ERC20 token to withdraw (can be NTE or any other token)
      * @param to The recipient address for withdrawn tokens (cannot be zero)
      * @param amount The amount of tokens to withdraw (in token's base units)
-     * @custom:access Only callable by contract owner with nonReentrant protection
+     * @custom:access Internal — invoked only via timelocked self-call (onlyTimelock)
      * @custom:safety Low-level call handles both standard and non-standard ERC20s
      * @custom:emit EmergencyTokenWithdraw event
      */
@@ -2089,7 +2082,7 @@ contract NTE is IERC20 {
     
     /**
      * @notice Emergency function to withdraw BNB/native currency from this contract.
-     * @dev Allows owner to recover BNB that was sent to the contract (e.g., from
+     * @dev Allows timelock to recover BNB that was sent to the contract (e.g., from
      *      liquidity operations or accidental sends). Safety restriction requires
      *      waiting 30 days after launch (OWNERSHIP_LOCK_PERIOD) to prevent abuse.
      *      Reverts with EMG_WAIT_30D if called before 30-day period,
@@ -2097,7 +2090,7 @@ contract NTE is IERC20 {
      *      or EMG_INSUF_BAL_BNB if contract has insufficient balance.
      * @param to The recipient address for withdrawn BNB (payable, cannot be zero)
      * @param amount The amount of BNB to withdraw in wei (must not exceed contract balance)
-     * @custom:access Only callable by contract owner with nonReentrant protection
+     * @custom:access Internal — invoked only via timelocked self-call (onlyTimelock)
      * @custom:security 30-day timelock prevents immediate withdrawal after launch
      * @custom:emit EmergencyBNBWithdraw event
      */
@@ -2124,7 +2117,7 @@ contract NTE is IERC20 {
      * @param enabled True to activate MEV protection, false to disable
      * @param maxBlocks Max blocks allowed between trades (0 = disabled, typical: 2-5)
      * @param minTime Min seconds required between trades (0 = disabled, typical: 3-30)
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:protection Prevents sandwich attacks, front-running, and block manipulation
      * @custom:emit MevProtectionConfigured and optionally MevProtectionToggled events
      */
@@ -2152,7 +2145,7 @@ contract NTE is IERC20 {
      *      Reverts with ADDR_INVALID if account is zero address.
      * @param account The address to grant or revoke MEV exemption (cannot be zero)
      * @param exempt True to bypass MEV checks, false to apply MEV protection
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:protection MEV protection prevents sandwich attacks and block manipulation
      * @custom:usage Grant to: routers, aggregators, trusted DeFi protocols
      * @custom:emit MevProtectionExemptUpdated event
@@ -2173,7 +2166,7 @@ contract NTE is IERC20 {
      * @param enabled True to activate velocity limits, false to disable
      * @param maxTx Maximum allowed transactions per time window (max 10, buffer size limit)
      * @param timeWindow Duration of rolling window in seconds (e.g., 300 = 5 minutes)
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:mechanism Uses circular buffer to track last 10 transaction timestamps
      * @custom:protection Prevents bot spam, rapid dumps, and automated manipulation
      * @custom:emit VelocityLimitConfigured event
@@ -2198,7 +2191,7 @@ contract NTE is IERC20 {
      *      Reverts with ADDR_INVALID if account is zero address.
      * @param account The address to grant or revoke velocity exemption (cannot be zero)
      * @param exempt True to bypass velocity limits, false to apply transaction limits
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:protection Velocity limits prevent bot spam and rapid manipulation
      * @custom:usage Grant to: routers, aggregators, liquidity managers
      * @custom:emit VelocityLimitExemptUpdated event
@@ -2219,7 +2212,7 @@ contract NTE is IERC20 {
      *      or ADDR_NOT_CONTRACT if enabling bypass for non-contract address.
      * @param helper The helper contract address to configure (must be a contract when enabling)
      * @param enabled True to allow bypass of protections, false to apply all protections
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to TREASURY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:security Bypass only works for self-transfers (helper moving its own tokens)
      * @custom:usage Typically used for category helper and liquidity manager contracts
      * @custom:emit HelperBypassUpdated event
@@ -2364,7 +2357,7 @@ contract NTE is IERC20 {
      *      or DEX_PAIR_CHECK if trying to unregister main pair.
      * @param pair The liquidity pair contract address (must be a contract)
      * @param status True to register as DEX pair (apply buy/sell tax), false to unregister
-     * @custom:access Only callable by contract owner
+     * @custom:access Internal — invoked only via timelocked self-call (onlyTimelock)
      * @custom:usage Add pairs for PancakeSwap, Uniswap, or other DEX liquidity pools
      * @custom:safety Cannot disable main pancakePair to prevent tax evasion
      * @custom:emit DexPairUpdated event
@@ -2386,7 +2379,7 @@ contract NTE is IERC20 {
      *      or DEX_FACTORY if address is not a contract.
      * @param factory The factory contract address to configure
      * @param trusted True to allow pairs from this factory to be keeper-registered, false to revoke
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:emit TrustedFactoryUpdated event
      */
     function setTrustedFactory(address factory, bool trusted) external onlyRoleOrGov(SECURITY_ROLE) {
@@ -2405,7 +2398,7 @@ contract NTE is IERC20 {
      *      or DEX_ROUTER if enabling trust for a non-contract address.
      * @param router Router contract address to configure
      * @param trusted True to trust router for exclusion, false to revoke
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:emit TrustedRouterUpdated event
      */
     function setTrustedRouter(address router, bool trusted) external onlyRoleOrGov(SECURITY_ROLE) {
@@ -2421,7 +2414,7 @@ contract NTE is IERC20 {
      *      Reverts with ADDR_INVALID if keeper is zero address.
      * @param keeper Keeper wallet address used by monitoring/ops automation
      * @param trusted True to authorize keeper, false to revoke authorization
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:emit TrustedKeeperUpdated event
      */
     function setTrustedKeeper(address keeper, bool trusted) external onlyRoleOrGov(SECURITY_ROLE) {
@@ -2472,7 +2465,7 @@ contract NTE is IERC20 {
      *      Reverts with ADDR_ZERO if router is zero address,
      *      or DEX_ROUTER if address is not a contract.
      * @param _pancakeRouter The PancakeSwap router contract address (must be valid contract)
-     * @custom:access Only callable by contract owner
+     * @custom:access Internal — invoked only via timelocked self-call (onlyTimelock)
      * @custom:usage Update when migrating to new DEX version or fixing deployment issues
      * @custom:emit PancakeRouterUpdated and TrustedRouterUpdated events
      */
@@ -2504,7 +2497,7 @@ contract NTE is IERC20 {
      *      Reverts with ADDR_ZERO if pair is zero address,
      *      or DEX_PAIR_NOT_CONTRACT if address is not a contract.
      * @param _pancakePair The liquidity pair contract address (must be valid contract)
-     * @custom:access Only callable by contract owner
+     * @custom:access Internal — invoked only via timelocked self-call (onlyTimelock)
      * @custom:usage Manual pair setup or migration to new liquidity pool
      * @custom:effect Unregisters old pair and registers new pair automatically
      * @custom:emit PancakePairUpdated event
@@ -2530,7 +2523,7 @@ contract NTE is IERC20 {
      *      enabled, even helper bypass transfers must involve whitelisted addresses.
      *      When disabled, helper bypass transfers skip whitelist validation entirely.
      * @param enabled True to enforce whitelist on helper transfers, false to allow bypass
-     * @custom:access Only callable by contract owner
+     * @custom:access Restricted to TREASURY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:conditional Only relevant when whitelistEnabled is true
      * @custom:emit HelperWhitelistEnforcementUpdated event
      */
@@ -2814,7 +2807,7 @@ contract NTE is IERC20 {
 
         bool isHelperBypassFlow = (helperBypass[msg.sender] && from == msg.sender);
         
-        // If we're paused, everything stops (unless you're the owner/governance)
+        // If we're paused, everything stops (unless you're the governance role holders)
         if (_paused) {
             if (pauseIncludesOwner) {
                 revert SYS_DISABLED();
@@ -2823,7 +2816,7 @@ contract NTE is IERC20 {
             }
         }
 
-        // Owner-approved helper self-transfers should not be throttled/taxed by
+        // Governance-approved helper self-transfers should not be throttled/taxed by
         // trading protections. Keep pause and blacklist checks as global controls.
         if (isHelperBypassFlow) {
             if (isBlacklistedActive(from)) revert BL_SENDER();
