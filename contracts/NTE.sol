@@ -102,9 +102,8 @@ pragma solidity 0.8.28;
  * PRICE_INVALID    Impact must be 0.1% to 100%
  *
  * ┌─────────────────────────────────────────────────────────────────────────┐
- * │ CATEGORIES & STRINGS [CAT_*, STR_*]                                     │
+ * │ STRINGS [STR_*]                                                         │
  * └─────────────────────────────────────────────────────────────────────────┘
- * CAT_INVALID      This category doesn't exist   CAT_DISABLED       Category is turned off
  * STR_TOO_LONG       String exceeds max length
  * STR_EMPTY        String cannot be empty
  *
@@ -164,7 +163,7 @@ interface IPancakeFactory {
 }
 
 /// @title Standard ERC20 Interface
-/// @notice Core ERC20 interface with an extra categorized transfer event
+/// @notice Core ERC20 interface
 interface IERC20 {
     /**
      * @notice Returns the total token supply.
@@ -222,16 +221,7 @@ interface IERC20 {
      */
     event Approval(address indexed owner, address indexed spender, uint256 value);
 
-    /**
-     * @notice Emitted when a transfer is tagged with a payment category.
-     * @param from The sender of the tokens.
-     * @param to The recipient of the tokens.
-     * @param value The amount of tokens moved.
-     * @param category The ID of the payment category.
-     * @param referenceId External reference ID for tracking.
-     * @param memo Optional note about the transfer.
-     */
-    event TransactionProcessed(address indexed from, address indexed to, uint256 value, uint8 category, string referenceId, string memo);
+
 }
 
 /**
@@ -244,7 +234,6 @@ interface IERC20 {
  *      - MEV/Bot protection (multi-layer defense against malicious trading)
  *      - Anti-dump mechanisms (sell limits and cooldowns)
  *      - Velocity limits (transaction frequency controls)
- *      - Categorized transactions (off-chain signed payments with categories)
 
  *      - Whitelist/Blacklist system (access control)
  *      - Two-step ownership transfer (safe ownership changes)
@@ -317,8 +306,7 @@ contract NTE is IERC20 {
     /// @notice A master switch to stop all transfers if something goes wrong
     bool private _paused;
     
-    /// @notice Wallets authorized to sign off-chain instructions (apps, websites, services)
-    mapping(address => bool) public isAuthSigner;
+
     
     /// @notice The wallet where all collected taxes are sent
     address private treasury;
@@ -361,36 +349,7 @@ contract NTE is IERC20 {
     uint256 private constant antiBotDuration = 3900;
     
     // ===================================================
-    // SMART CATEGORIES - Organized Payments
-    // ===================================================
-    
-    /// @notice How many trades happened in each category
-    mapping(uint8 => uint256) public categoryTransactionCount;
-    /// @notice Total volume of tokens moved per category
-    mapping(uint8 => uint256) public categoryTotalVolume;
-    /// @notice Your personal trade count per category
-    mapping(address => mapping(uint8 => uint256)) public userCategoryCount;
-    /// @notice Your personal volume per category
-    mapping(address => mapping(uint8 => uint256)) public userCategoryVolume;
-    
-    /// @notice Whether a specific category is active right now
-    mapping(uint8 => bool) public categoryEnabled;
 
-    /**
-     * @notice A personal "counter" for your categorized trades to prevent double-spending.
-     */
-    mapping(address => uint256) public userCategorizedNonce;
-    
-    /// @notice The names for our payment categories (e.g., "Charity", "Business")
-    mapping(uint8 => string) public categoryNames;
-    /// @notice How many categories we've created so far
-    uint8 public totalCategories;
-
-    /// @notice Emitted when we add a new authorized signer
-    event AuthSignerAdded(address indexed authAddress);
-    
-    /// @notice Emitted when we remove an authorized signer
-    event AuthSignerRemoved(address indexed authAddress);
     
     /// @notice What we call the token
     string private _name;
@@ -615,14 +574,7 @@ contract NTE is IERC20 {
     /// @notice Emitted when protection exemption for an address changes
     event MevProtectionExemptUpdated(address indexed account, bool exempt);
     
-    /// @notice Emitted when a payment category is enabled or disabled
-    event CategoryStatusUpdated(uint8 indexed category, bool enabled);
-    /// @notice Emitted when category statistics are updated
-    event CategoryStatsUpdated(uint8 indexed category, uint256 txCount, uint256 totalVolume);
-    /// @notice Emitted when a new payment category is added
-    event CategoryAdded(uint8 indexed categoryId, string name);
-    /// @notice Emitted when an existing payment category is updated
-    event CategoryUpdated(uint8 indexed categoryId, string name);
+
     
     /// @notice Emitted when velocity protection settings change
     event VelocityLimitConfigured(bool enabled, uint256 maxTxPerWindow, uint256 timeWindow);
@@ -872,10 +824,7 @@ contract NTE is IERC20 {
     /// @notice Thrown when transaction price impact exceeds limit
     error PRICE_TOO_HIGH();
     
-    /// @notice Thrown when category ID is invalid or doesn't exist
-    error CAT_INVALID();
-    /// @notice Thrown when category is disabled
-    error CAT_DISABLED();
+
     
     /// @notice Thrown when string exceeds maximum length (256 chars)
     error STR_TOO_LONG();
@@ -1147,223 +1096,7 @@ contract NTE is IERC20 {
         return true;
     }
 
-    // ===================================================
-    // PAYMENT CATEGORIZATION TRANSFER FUNCTIONS
-    // ===================================================
-    
-    /**
-     * @notice Executes a categorized token transfer with off-chain authorization and metadata tracking.
-     * @dev This function enables gas-less or delegated transfers with category tracking.
-     *      An off-chain authorized signer (backend service) signs the transaction parameters,
-     *      allowing a relayer to execute the transaction while maintaining security.
-     *      
-     *      **Flow:**
-     *      1. Off-chain backend signs: (contract, from, to, amount, category, txRef, nonce, deadline, chainId)
-     *      2. `from` address grants allowance to caller (relayer/helper) once
-     *      3. Relayer calls transactionFrom() and pays gas on behalf of `from`
-     *      4. Contract validates signature and processes transfer with category metadata
-     *      
-     *      **Security measures:**
-     *      - Per-address nonce (userCategorizedNonce[from]) prevents replay attacks
-     *      - Deadline timestamp ensures signatures expire and can't be used indefinitely
-     *      - Signature bound to specific contract address and chain ID
-     *      - Category must be enabled and within valid range
-     *      - All standard transfer protections apply (taxes, MEV, velocity, etc.)
-     * 
-     * @param from The address whose tokens are being transferred (must have approved caller)
-     * @param to The address receiving the tokens (cannot be zero address)
-     * @param amount The amount of tokens to transfer (in base units with 18 decimals)
-     * @param category The category ID for this transaction (0-254, must be enabled)
-     * @param signature ECDSA signature from authorized signer (65 bytes: r, s, v)
-     * @param nonce Expected nonce for the `from` address (must match current nonce)
-     * @param deadline Unix timestamp after which signature expires
-     * @param txReference External reference (invoice/order number, max 64 chars)
-     * @param memo Transaction note or description (max 64 chars)
-     * @return success Always returns true on successful execution, reverts on failure
-     * 
-     * @custom:security Signature validation with malleability checks and nonce enforcement
-     * @custom:categories Automatically updates category statistics and user metrics
-     * @custom:allowance Spends allowance from `from` to caller before processing transfer
-     * @custom:emit TransactionProcessed and CategoryStatsUpdated events
-     */
-    function transactionFrom(
-        address from,
-        address to,
-        uint256 amount,
-        uint8 category,
-        bytes calldata signature,
-        uint256 nonce,
-        uint256 deadline,
-        string calldata txReference,
-        string calldata memo
-    ) external returns (bool) {
-        if (from == address(0)) revert ADDR_FROM_ZERO();
-        if (to == address(0)) revert ADDR_TO_ZERO();
-        if (amount == 0) revert TXN_AMOUNT_ZERO();
-        if (block.timestamp > deadline) revert SIG_EXPIRED();
 
-        uint256 expectedNonce = userCategorizedNonce[from];
-        if (nonce != expectedNonce) revert TXN_REPLAY();
-
-        bytes32 messageHash = keccak256(
-            abi.encodePacked(
-                address(this),
-                from,
-                to,
-                amount,
-                category,
-                txReference,
-                nonce,
-                deadline,
-                _deploymentChainId
-            )
-        );
-
-        bytes32 ethSignedMessageHash = keccak256(
-            abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash)
-        );
-
-        address signer = _recoverSigner(ethSignedMessageHash, signature);
-        if (signer == address(0)) revert AUTH_ZERO_ADDR();
-        if (!isAuthSigner[signer]) revert AUTH_INVALID();
-
-        if (category >= totalCategories) revert CAT_INVALID();
-        if (!categoryEnabled[category]) revert CAT_DISABLED();
-
-        if (bytes(txReference).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
-        if (bytes(memo).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
-
-        _spendAllowance(from, msg.sender, amount);
-        _transferWithTax(from, to, amount);
-
-        unchecked {
-            if (categoryTransactionCount[category] >= type(uint256).max) revert TXN_OVERFLOW();
-            categoryTransactionCount[category]++;
-
-            if (categoryTotalVolume[category] > type(uint256).max - amount) revert TXN_OVERFLOW();
-            categoryTotalVolume[category] += amount;
-
-            if (userCategoryCount[from][category] >= type(uint256).max) revert TXN_OVERFLOW();
-            userCategoryCount[from][category]++;
-
-            if (userCategoryVolume[from][category] > type(uint256).max - amount) revert TXN_OVERFLOW();
-            userCategoryVolume[from][category] += amount;
-        }
-
-        userCategorizedNonce[from] = expectedNonce + 1;
-
-        emit TransactionProcessed(from, to, amount, category, txReference, memo);
-        emit CategoryStatsUpdated(category, categoryTransactionCount[category], categoryTotalVolume[category]);
-
-        return true;
-    }
-    
-    /**
-     * @notice Returns the display name of a specific payment category.
-     * @dev Reverts with CAT_INVALID if category ID is out of bounds.
-     * @param category The category ID to query (must be less than totalCategories)
-     * @return name The human-readable category name string (e.g., "Business", "Rewards")
-     * @custom:view Pure read operation with category bounds validation
-     */
-    function getCategoryName(uint8 category) external view returns (string memory) {
-        if (category >= totalCategories) revert CAT_INVALID();
-        return categoryNames[category];
-    }
-    
-    /**
-     * @notice Enables or disables a specific payment category for new transactions.
-     * @dev Disabled categories cannot be used in transactionFrom calls.
-     *      Existing transactions with that category are still recorded in history.
-     *      Reverts with CAT_INVALID if category ID is out of bounds.
-     * @param category The category ID to update (must be less than totalCategories)
-     * @param enabled True to allow transactions in this category, false to block
-     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
-     * @custom:emit CategoryStatusUpdated event
-     */
-    function setCategoryEnabled(uint8 category, bool enabled) external onlyRoleOrGov(SECURITY_ROLE) {
-        if (category >= totalCategories) revert CAT_INVALID();
-        categoryEnabled[category] = enabled;
-        emit CategoryStatusUpdated(category, enabled);
-    }
-    
-    /**
-     * @notice Updates the display name of an existing payment category.
-     * @dev Useful for rebranding or fixing typos in category names.
-     *      Reverts with CAT_INVALID if category doesn't exist, STR_EMPTY if name is empty,
-     *      or STR_TOO_LONG if name exceeds MAX_STRING_LENGTH (64 characters).
-     * @param category The category ID to rename (must be less than totalCategories)
-     * @param newName The new display name for this category (1-64 characters)
-     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
-     * @custom:validation Name must be non-empty and within length limits
-     * @custom:emit CategoryUpdated event
-     */
-    function updateCategoryName(uint8 category, string calldata newName) external onlyRoleOrGov(SECURITY_ROLE) {
-        if (category >= totalCategories) revert CAT_INVALID();
-        if (bytes(newName).length == 0) revert STR_EMPTY();
-        if (bytes(newName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
-        categoryNames[category] = newName;
-        emit CategoryUpdated(category, newName);
-    }
-    
-    /**
-     * @notice Adds a new payment category to the system for transaction classification.
-     * @dev Creates a new category with auto-incremented ID starting from 0.
-     *      Maximum of 255 categories can be created (uint8 limit).
-     *      New categories are automatically enabled when created.
-     *      Reverts with STR_EMPTY if name is empty, STR_TOO_LONG if exceeds 64 chars,
-     *      or CAT_INVALID if already at maximum category count.
-     * @param categoryName The display name for the new category (1-64 characters)
-     * @return categoryId The newly assigned category ID (0-254)
-     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
-     * @custom:effects Increments totalCategories counter and enables new category
-     * @custom:emit CategoryAdded event with new ID and name
-     */
-    function addCategory(string calldata categoryName) external onlyRoleOrGov(SECURITY_ROLE) returns (uint8 categoryId) {
-        if (bytes(categoryName).length == 0) revert STR_EMPTY();
-        if (bytes(categoryName).length > MAX_STRING_LENGTH) revert STR_TOO_LONG();
-        if (totalCategories == 255) revert CAT_INVALID();
-        
-        categoryId = totalCategories;
-        categoryNames[categoryId] = categoryName;
-        categoryEnabled[categoryId] = true;
-        totalCategories++;
-        
-        emit CategoryAdded(categoryId, categoryName);
-        return categoryId;
-    }
-
-    /**
-     * @notice Authorizes a new off-chain signer for categorized transfer validation.
-     * @dev Signer addresses should be managed securely using HSM, KMS, or secure backend.
-     *      Only authorized signers can create valid signatures for transactionFrom calls.
-     *      Reverts with ADDR_ZERO if address is zero, or AUTH_ALREADY_SET if already authorized.
-     * @param authAddress The backend service or signer address to authorize (cannot be zero)
-     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
-     * @custom:security Store private keys in secure infrastructure (HSM/KMS recommended)
-     * @custom:emit AuthSignerAdded event
-     */
-    function addAuthSigner(address authAddress) external onlyRoleOrGov(SECURITY_ROLE) {
-        if (authAddress == address(0)) revert ADDR_ZERO();
-        if (isAuthSigner[authAddress]) revert AUTH_ALREADY_SET();
-        isAuthSigner[authAddress] = true;
-        emit AuthSignerAdded(authAddress);
-    }
-
-    /**
-     * @notice Revokes authorization from an off-chain signer for categorized transfers.
-     * @dev Immediately invalidates all future signatures from this address.
-     *      Previously signed but unexecuted transactions will fail validation.
-     *      Reverts with AUTH_NOT_SET if address was not previously authorized.
-     * @param authAddress The signer address to remove from authorized list
-     * @custom:access Restricted to SECURITY_ROLE holders or GOVERNANCE_ROLE holders
-     * @custom:effect Immediately blocks all new signatures from this address
-     * @custom:emit AuthSignerRemoved event
-     */
-    function removeAuthSigner(address authAddress) external onlyRoleOrGov(SECURITY_ROLE) {
-        if (!isAuthSigner[authAddress]) revert AUTH_NOT_SET();
-        isAuthSigner[authAddress] = false;
-        emit AuthSignerRemoved(authAddress);
-    }
 
     /**
      * @notice Burns tokens from the caller's balance, permanently removing them from circulation.
@@ -2240,7 +1973,7 @@ contract NTE is IERC20 {
      * @notice Sets whether a helper contract can bypass trading protections for self-transfers.
      * @dev Bypass only applies when msg.sender == from inside _transferWithTax,
      *      meaning the helper is transferring its own tokens. This enables helper
-     *      contracts (like category helpers) to operate smoothly without hitting
+     *      contracts (like category managers) to operate smoothly without hitting
      *      velocity/MEV limits while moving their own funds.
      *      Reverts with ADDR_INVALID if helper is zero address,
      *      or ADDR_NOT_CONTRACT if enabling bypass for non-contract address.
@@ -2248,7 +1981,7 @@ contract NTE is IERC20 {
      * @param enabled True to allow bypass of protections, false to apply all protections
      * @custom:access Restricted to TREASURY_ROLE holders or GOVERNANCE_ROLE holders
      * @custom:security Bypass only works for self-transfers (helper moving its own tokens)
-     * @custom:usage Typically used for category helper and liquidity manager contracts
+     * @custom:usage Typically used for category manager and liquidity manager contracts
      * @custom:emit HelperBypassUpdated event
      */
     function setHelperBypass(address helper, bool enabled) external onlyRoleOrGov(TREASURY_ROLE) {
@@ -3138,44 +2871,7 @@ contract NTE is IERC20 {
 
 
     
-    /**
-     * @dev Internal pure function to recover the signer address from an ECDSA signature.
-     *      Implements Ethereum's ecrecover with additional security validations including
-     *      signature malleability checks (s-value validation) to prevent signature replay attacks.
-     *      Used for categorized transactions to verify off-chain authorization.
-     * @param _ethSignedMessageHash The keccak256 hash of the signed message (prefixed with \x19Ethereum Signed Message:\n32)
-     * @param _signature The raw 65-byte ECDSA signature containing r, s, and v components
-     * @return signer The address that created the signature, or address(0) if validation fails
-     * @custom:security Validates signature length (65 bytes), v value (27/28), and s-value malleability
-     * @custom:format Signature format: bytes32(r) + bytes32(s) + uint8(v)
-     */
-    function _recoverSigner(bytes32 _ethSignedMessageHash, bytes memory _signature) internal pure returns (address) {
-        if (_signature.length != 65) return address(0);
 
-        bytes32 r;
-        bytes32 s;
-        uint8 v;
-
-        // Assembly magic to pull r, s, and v out of the signature bytes
-        assembly {
-            r := mload(add(_signature, 32))
-            s := mload(add(_signature, 64))
-            v := byte(0, mload(add(_signature, 96)))
-        }
-
-        if (v < 27) v += 27;
-        if (v != 27 && v != 28) return address(0);
-
-        // Security check for the "s" value
-        if (uint256(s) > 0x7FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF5D576E7357A4501DDFE92F46681B20A0) {
-            return address(0);
-        }
-
-        address recovered = ecrecover(_ethSignedMessageHash, v, r, s);
-        if (recovered == address(0)) return address(0);
-        
-        return recovered;
-    }
 
     /**
      * @dev Internal function to initialize the PancakeSwap liquidity pair for NTE/WBNB.
